@@ -18,6 +18,8 @@ import (
 type CanonicalConfig struct {
 	SliderMapping *sliderMap
 
+	AdditiveIndices []int
+
 	ConnectionInfo struct {
 		COMPort  string
 		BaudRate int
@@ -48,6 +50,7 @@ const (
 
 	configType = "yaml"
 
+	configKeyAdditive            = "additive_indices"
 	configKeySliderMapping       = "slider_mapping"
 	configKeyInvertSliders       = "invert_sliders"
 	configKeyCOMPort             = "com_port"
@@ -85,6 +88,7 @@ func NewConfig(logger *zap.SugaredLogger, notifier Notifier) (*CanonicalConfig, 
 	userConfig.SetConfigType(configType)
 	userConfig.AddConfigPath(userConfigPath)
 
+	userConfig.SetDefault(configKeyAdditive, []int{})
 	userConfig.SetDefault(configKeySliderMapping, map[string][]string{})
 	userConfig.SetDefault(configKeyInvertSliders, false)
 	userConfig.SetDefault(configKeyCOMPort, defaultCOMPort)
@@ -145,6 +149,7 @@ func (cc *CanonicalConfig) Load() error {
 	cc.logger.Info("Loaded config successfully")
 	cc.logger.Infow("Config values",
 		"sliderMapping", cc.SliderMapping,
+		"additiveIndices", cc.AdditiveIndices,
 		"connectionInfo", cc.ConnectionInfo,
 		"invertSliders", cc.InvertSliders)
 
@@ -174,7 +179,6 @@ func (cc *CanonicalConfig) WatchConfigFileChanges() {
 	// establish watch using viper as opposed to doing it ourselves, though our internal cooldown is still required
 	cc.userConfig.WatchConfig()
 	cc.userConfig.OnConfigChange(func(event fsnotify.Event) {
-
 		// when we get a write event...
 		if event.Op&fsnotify.Write == fsnotify.Write {
 
@@ -216,12 +220,15 @@ func (cc *CanonicalConfig) StopWatchingConfigFile() {
 }
 
 func (cc *CanonicalConfig) populateFromVipers() error {
-
 	// merge the slider mappings from the user and internal configs
 	cc.SliderMapping = sliderMapFromConfigs(
 		cc.userConfig.GetStringMapStringSlice(configKeySliderMapping),
 		cc.internalConfig.GetStringMapStringSlice(configKeySliderMapping),
 	)
+
+	cc.AdditiveIndices = cc.userConfig.GetIntSlice(configKeyAdditive)
+
+	cc.logger.Debugw("encoders found", "indices", cc.AdditiveIndices)
 
 	// get the rest of the config fields - viper saves us a lot of effort here
 	cc.ConnectionInfo.COMPort = cc.userConfig.GetString(configKeyCOMPort)
