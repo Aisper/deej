@@ -6,12 +6,12 @@ import (
 	"fmt"
 	"io"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/jacobsa/go-serial/serial"
 	"go.uber.org/zap"
+	"golang.org/x/exp/slices"
 
 	"github.com/omriharel/deej/pkg/deej/util"
 )
@@ -29,19 +29,30 @@ type SerialIO struct {
 	connOptions serial.OpenOptions
 	conn        io.ReadWriteCloser
 
-	lastKnownNumSliders        int
-	currentSliderPercentValues []float32
+	lastKnownNumSliders int
+	currentVolumeDatas  []VolumeData
 
-	sliderMoveConsumers []chan SliderMoveEvent
+	sliderMoveConsumers []chan SliderEvent
 }
 
-// SliderMoveEvent represents a single slider move captured by deej
-type SliderMoveEvent struct {
+type VolumeData struct {
+	Value float32
+	Mute  bool
+}
+
+type ArduinoData struct {
+	Value      int
+	ToggleMute bool
+}
+
+// SliderEvent represents a single slider move captured by deej
+type SliderEvent struct {
 	SliderID     int
 	PercentValue float32
+	ToggleMute   bool
 }
 
-var expectedLinePattern = regexp.MustCompile(`^\d{1,4}(\|\d{1,4})*\r\n$`)
+var expectedLinePattern = regexp.MustCompile(`^-?\d{1,4}(\|-?\d{1,4})*\r\n$`)
 
 // NewSerialIO creates a SerialIO instance that uses the provided deej
 // instance's connection info to establish communications with the arduino chip
@@ -54,7 +65,7 @@ func NewSerialIO(deej *Deej, logger *zap.SugaredLogger) (*SerialIO, error) {
 		stopChannel:         make(chan bool),
 		connected:           false,
 		conn:                nil,
-		sliderMoveConsumers: []chan SliderMoveEvent{},
+		sliderMoveConsumers: []chan SliderEvent{},
 	}
 
 	logger.Debug("Created serial i/o instance")
@@ -67,7 +78,6 @@ func NewSerialIO(deej *Deej, logger *zap.SugaredLogger) (*SerialIO, error) {
 
 // Start attempts to connect to our arduino chip
 func (sio *SerialIO) Start() error {
-
 	// don't allow multiple concurrent connections
 	if sio.connected {
 		sio.logger.Warn("Already connected, can't start another without closing first")
@@ -112,14 +122,14 @@ func (sio *SerialIO) Start() error {
 	// read lines or await a stop
 	go func() {
 		connReader := bufio.NewReader(sio.conn)
-		lineChannel := sio.readLine(namedLogger, connReader)
+		bytesChannel := sio.readBytes(namedLogger, connReader)
 
 		for {
 			select {
 			case <-sio.stopChannel:
 				sio.close(namedLogger)
-			case line := <-lineChannel:
-				sio.handleLine(namedLogger, line)
+			case bytes := <-bytesChannel:
+				sio.handleBytes(namedLogger, bytes)
 			}
 		}
 	}()
@@ -139,8 +149,8 @@ func (sio *SerialIO) Stop() {
 
 // SubscribeToSliderMoveEvents returns an unbuffered channel that receives
 // a sliderMoveEvent struct every time a slider moves
-func (sio *SerialIO) SubscribeToSliderMoveEvents() chan SliderMoveEvent {
-	ch := make(chan SliderMoveEvent)
+func (sio *SerialIO) SubscribeToSliderMoveEvents() chan SliderEvent {
+	ch := make(chan SliderEvent)
 	sio.sliderMoveConsumers = append(sio.sliderMoveConsumers, ch)
 
 	return ch
@@ -198,73 +208,82 @@ func (sio *SerialIO) close(logger *zap.SugaredLogger) {
 	sio.connected = false
 }
 
-func (sio *SerialIO) readLine(logger *zap.SugaredLogger, reader *bufio.Reader) chan string {
-	ch := make(chan string)
+func (sio *SerialIO) readBytes(logger *zap.SugaredLogger, reader *bufio.Reader) chan []byte {
+	ch := make(chan []byte)
 
 	go func() {
 		for {
-			line, err := reader.ReadString('\n')
+			bytes, err := reader.ReadBytes('\n')
 			if err != nil {
-
 				if sio.deej.Verbose() {
-					logger.Warnw("Failed to read line from serial", "error", err, "line", line)
-				}
+					logger.Warnw("Failed to read bytes from serial", "error", err, "bytes", bytes)
 
-				// just ignore the line, the read loop will stop after this
-				return
+					return
+				}
 			}
 
 			if sio.deej.Verbose() {
-				logger.Debugw("Read new line", "line", line)
+				logger.Debugw("Read new bytes", "bytes", bytes)
 			}
 
-			// deliver the line to the channel
-			ch <- line
+			ch <- bytes[:len(bytes)-1]
 		}
 	}()
 
 	return ch
 }
 
-func (sio *SerialIO) handleLine(logger *zap.SugaredLogger, line string) {
+func (sio *SerialIO) handleBytes(logger *zap.SugaredLogger, bytes []byte) {
+	data := []ArduinoData{}
 
-	// this function receives an unsanitized line which is guaranteed to end with LF,
-	// but most lines will end with CRLF. it may also have garbage instead of
-	// deej-formatted values, so we must check for that! just ignore bad ones
-	if !expectedLinePattern.MatchString(line) {
+	if len(bytes)%2 != 0 {
+		logger.Warnw("Wrong number of bytes received", "bytes number", len(bytes))
 		return
 	}
 
-	// trim the suffix
-	line = strings.TrimSuffix(line, "\r\n")
+	for i := 0; i < len(bytes); i += 2 {
+		data = append(data, ArduinoData{})
+		newDataIdx := len(data) - 1
 
-	// split on pipe (|), this gives a slice of numerical strings between "0" and "1023"
-	splitLine := strings.Split(line, "|")
-	numSliders := len(splitLine)
+		packed := uint16(bytes[i])<<8 | uint16(bytes[i+1])
+
+		data[newDataIdx].ToggleMute = (packed>>11)&0x01 != 0
+
+		rawValue := packed & 0x07FF
+
+		if rawValue&0x0400 != 0 {
+			data[newDataIdx].Value = int(int16(rawValue | 0xF800))
+		} else {
+			data[newDataIdx].Value = int(rawValue)
+		}
+	}
+
+	logger.Debugw("Reconstructed data", "data", data)
+
+	numSliders := len(data)
 
 	// update our slider count, if needed - this will send slider move events for all
 	if numSliders != sio.lastKnownNumSliders {
 		logger.Infow("Detected sliders", "amount", numSliders)
 		sio.lastKnownNumSliders = numSliders
-		sio.currentSliderPercentValues = make([]float32, numSliders)
+		sio.currentVolumeDatas = make([]VolumeData, numSliders)
 
 		// reset everything to be an impossible value to force the slider move event later
-		for idx := range sio.currentSliderPercentValues {
-			sio.currentSliderPercentValues[idx] = -1.0
+		for idx := range sio.currentVolumeDatas {
+			sio.currentVolumeDatas[idx].Value = -1.0
 		}
 	}
 
 	// for each slider:
-	moveEvents := []SliderMoveEvent{}
-	for sliderIdx, stringValue := range splitLine {
+	sliderEvents := []SliderEvent{}
+	for sliderIdx, arduinoData := range data {
 
-		// convert string values to integers ("1023" -> 1023)
-		number, _ := strconv.Atoi(stringValue)
+		number := arduinoData.Value
 
 		// turns out the first line could come out dirty sometimes (i.e. "4558|925|41|643|220")
 		// so let's check the first number for correctness just in case
 		if sliderIdx == 0 && number > 1023 {
-			sio.logger.Debugw("Got malformed line from serial, ignoring", "line", line)
+			sio.logger.Debugw("Got malformed line from serial, ignoring", "data", arduinoData)
 			return
 		}
 
@@ -279,27 +298,48 @@ func (sio *SerialIO) handleLine(logger *zap.SugaredLogger, line string) {
 			normalizedScalar = 1 - normalizedScalar
 		}
 
+		if slices.Contains(sio.deej.config.AdditiveIndices, sliderIdx) {
+			finalVolume := sio.deej.sessions.getCurrentVolume(sliderIdx)
+
+			if number != 0 {
+				finalVolume += normalizedScalar
+
+				if finalVolume < 0 {
+					finalVolume = 0
+				}
+				if finalVolume > 1 {
+					finalVolume = 1
+				}
+			}
+
+			normalizedScalar = finalVolume
+		}
+
 		// check if it changes the desired state (could just be a jumpy raw slider value)
-		if util.SignificantlyDifferent(sio.currentSliderPercentValues[sliderIdx], normalizedScalar, sio.deej.config.NoiseReductionLevel) {
+		significantlyDifferent := util.SignificantlyDifferent(sio.currentVolumeDatas[sliderIdx].Value, normalizedScalar, sio.deej.config.NoiseReductionLevel)
+
+		if significantlyDifferent || arduinoData.ToggleMute {
 
 			// if it does, update the saved value and create a move event
-			sio.currentSliderPercentValues[sliderIdx] = normalizedScalar
+			sio.currentVolumeDatas[sliderIdx].Value = normalizedScalar
+			sio.currentVolumeDatas[sliderIdx].Mute = !sio.currentVolumeDatas[sliderIdx].Mute
 
-			moveEvents = append(moveEvents, SliderMoveEvent{
+			sliderEvents = append(sliderEvents, SliderEvent{
 				SliderID:     sliderIdx,
 				PercentValue: normalizedScalar,
+				ToggleMute:   arduinoData.ToggleMute,
 			})
 
 			if sio.deej.Verbose() {
-				logger.Debugw("Slider moved", "event", moveEvents[len(moveEvents)-1])
+				logger.Debugw("Slider event", "event", sliderEvents[len(sliderEvents)-1])
 			}
 		}
 	}
 
 	// deliver move events if there are any, towards all potential consumers
-	if len(moveEvents) > 0 {
+	if len(sliderEvents) > 0 {
 		for _, consumer := range sio.sliderMoveConsumers {
-			for _, moveEvent := range moveEvents {
+			for _, moveEvent := range sliderEvents {
 				consumer <- moveEvent
 			}
 		}
