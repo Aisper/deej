@@ -67,7 +67,6 @@ func NewSerialIO(deej *Deej, logger *zap.SugaredLogger) (*SerialIO, error) {
 
 // Start attempts to connect to our arduino chip
 func (sio *SerialIO) Start() error {
-
 	// don't allow multiple concurrent connections
 	if sio.connected {
 		sio.logger.Warn("Already connected, can't start another without closing first")
@@ -109,6 +108,8 @@ func (sio *SerialIO) Start() error {
 	namedLogger.Infow("Connected", "conn", sio.conn)
 	sio.connected = true
 
+	sio.performInitializationSequence()
+
 	// read lines or await a stop
 	go func() {
 		connReader := bufio.NewReader(sio.conn)
@@ -125,6 +126,98 @@ func (sio *SerialIO) Start() error {
 	}()
 
 	return nil
+}
+
+func (sio *SerialIO) performInitializationSequence() error {
+	sio.logger.Info("Waiting for Arduino initialization signal...")
+
+	// Wait for the '>' character from the Arduino
+	buf := make([]byte, 1)
+	reinitSignal := make([]byte, 1)
+	reinitSignal = append(reinitSignal, '>')
+	reinitSignal = append(reinitSignal, '!')
+	reinitSignal = append(reinitSignal, '<')
+	for {
+		sio.conn.Write(reinitSignal)
+
+		n, err := sio.conn.Read(buf)
+		if err != nil {
+			return fmt.Errorf("failed to read initialization signal: %w", err)
+		}
+
+		if n == 1 && buf[0] == '>' {
+			sio.logger.Info("Received initialization signal from Arduino")
+			break
+		}
+	}
+
+	volumes := make(map[int]int)
+
+	for ind, targets := range sio.deej.config.SliderMapping.m {
+
+		found := false
+
+		// for each possible target for this slider...
+		for _, target := range targets {
+
+			// resolve the target name by cleaning it up and applying any special transformations.
+			// depending on the transformation applied, this can result in more than one target name
+			resolvedTargets := sio.deej.sessions.resolveTarget(target)
+
+			// for each resolved target...
+			for _, resolvedTarget := range resolvedTargets {
+
+				// check the map for matching sessions
+				sessions, ok := sio.deej.sessions.get(resolvedTarget)
+
+				// no sessions matching this target - move on
+				if !ok {
+					continue
+				}
+
+				volumes[ind] = int(sessions[0].GetVolume())
+				found = true
+
+				break
+			}
+
+			if found {
+				break
+			}
+		}
+
+		if found {
+			continue
+		}
+	}
+
+	// Send initialization data to the Arduino
+	initData := make([]byte, 0, len(volumes)+2)
+
+	initData = append(initData, '>')
+	for _, value := range volumes {
+
+		if value < 0 || value > 255 {
+			panic("value exceeds 2 bytes")
+		}
+
+		initData = append(initData, byte(value))
+	}
+	initData = append(initData, '<')
+
+	if _, err := sio.conn.Write(initData); err != nil {
+		return fmt.Errorf("failed to send initialization data: %w", err)
+	}
+
+	sio.logger.Infow("Initialization data sent", "data", string(initData))
+
+	for {
+		n, _ := sio.conn.Read(buf)
+		if n == 1 && buf[0] == '<' {
+			sio.logger.Info("Received confirmation signal from Arduino")
+			return nil // Success
+		}
+	}
 }
 
 // Stop signals us to shut down our serial connection, if one is active
@@ -227,7 +320,6 @@ func (sio *SerialIO) readLine(logger *zap.SugaredLogger, reader *bufio.Reader) c
 }
 
 func (sio *SerialIO) handleLine(logger *zap.SugaredLogger, line string) {
-
 	// this function receives an unsanitized line which is guaranteed to end with LF,
 	// but most lines will end with CRLF. it may also have garbage instead of
 	// deej-formatted values, so we must check for that! just ignore bad ones
