@@ -108,7 +108,10 @@ func (sio *SerialIO) Start() error {
 	namedLogger.Infow("Connected", "conn", sio.conn)
 	sio.connected = true
 
-	sio.performInitializationSequence()
+	if err := sio.performInitializationSequence(); err != nil {
+		sio.close(namedLogger) // Clean up if initialization fails
+		return fmt.Errorf("initialization failed: %w", err)
+	}
 
 	// read lines or await a stop
 	go func() {
@@ -128,29 +131,92 @@ func (sio *SerialIO) Start() error {
 	return nil
 }
 
-func (sio *SerialIO) performInitializationSequence() error {
-	sio.logger.Info("Waiting for Arduino initialization signal...")
+const (
+	handshakeTimeout       = 5 * time.Second
+	handshakeRetryInterval = 500 * time.Millisecond
+	handshakeChar          = '>'
+	ackChar                = '<'
+)
 
-	// Wait for the '>' character from the Arduino
-	buf := make([]byte, 1)
-	reinitSignal := make([]byte, 1)
-	reinitSignal = append(reinitSignal, '>')
-	reinitSignal = append(reinitSignal, '!')
-	reinitSignal = append(reinitSignal, '<')
-	for {
-		sio.conn.Write(reinitSignal)
+func (sio *SerialIO) performHandshake() error {
+	sio.logger.Info("Starting handshake protocol")
 
-		n, err := sio.conn.Read(buf)
-		if err != nil {
-			return fmt.Errorf("failed to read initialization signal: %w", err)
-		}
-
-		if n == 1 && buf[0] == '>' {
-			sio.logger.Info("Received initialization signal from Arduino")
-			break
-		}
+	// Flush any existing data in the buffer
+	if flusher, ok := sio.conn.(interface{ Flush() error }); ok {
+		flusher.Flush()
 	}
 
+	handshakeDone := make(chan bool)
+	errChan := make(chan error)
+
+	// Start handshake routine
+	go func() {
+		buf := make([]byte, 1)
+		retryTicker := time.NewTicker(handshakeRetryInterval)
+		defer retryTicker.Stop()
+
+		// Send initial handshake signal
+		if _, err := sio.conn.Write([]byte{handshakeChar}); err != nil {
+			errChan <- fmt.Errorf("failed to send handshake: %w", err)
+			return
+		}
+
+		for {
+			select {
+			case <-handshakeDone:
+				return
+			case <-retryTicker.C:
+				// Resend handshake periodically
+				if _, err := sio.conn.Write([]byte{handshakeChar}); err != nil {
+					errChan <- fmt.Errorf("failed to resend handshake: %w", err)
+					return
+				}
+			default:
+				// Check for response
+				n, err := sio.conn.Read(buf)
+				if err != nil {
+					if err != io.EOF {
+						errChan <- fmt.Errorf("read error during handshake: %w", err)
+						return
+					}
+					continue
+				}
+
+				if n > 0 {
+					switch buf[0] {
+					case handshakeChar:
+						// Arduino is initiating handshake
+						sio.logger.Debug("Received handshake initiation from Arduino")
+						if _, err := sio.conn.Write([]byte{ackChar}); err != nil {
+							errChan <- err
+							return
+						}
+						handshakeDone <- true
+						return
+					case ackChar:
+						// Arduino acknowledged our handshake
+						sio.logger.Debug("Received handshake ACK from Arduino")
+						handshakeDone <- true
+						return
+					}
+				}
+			}
+		}
+	}()
+
+	// Wait for handshake completion or timeout
+	select {
+	case <-handshakeDone:
+		sio.logger.Info("Handshake completed successfully")
+		return nil
+	case err := <-errChan:
+		return err
+	case <-time.After(handshakeTimeout):
+		return fmt.Errorf("handshake timed out after %v", handshakeTimeout)
+	}
+}
+
+func (sio *SerialIO) produceInitData() []byte {
 	volumes := make(map[int]int)
 
 	for ind, targets := range sio.deej.config.SliderMapping.m {
@@ -205,19 +271,32 @@ func (sio *SerialIO) performInitializationSequence() error {
 	}
 	initData = append(initData, '<')
 
+	return initData
+}
+
+func (sio *SerialIO) performInitializationSequence() error {
+	if err := sio.performHandshake(); err != nil {
+		return fmt.Errorf("handshake failed: %w", err)
+	}
+
+	// Send initialization data
+	initData := sio.produceInitData()
 	if _, err := sio.conn.Write(initData); err != nil {
 		return fmt.Errorf("failed to send initialization data: %w", err)
 	}
 
-	sio.logger.Infow("Initialization data sent", "data", string(initData))
-
-	for {
-		n, _ := sio.conn.Read(buf)
-		if n == 1 && buf[0] == '<' {
-			sio.logger.Info("Received confirmation signal from Arduino")
-			return nil // Success
-		}
+	// Wait for ACK that data was received
+	buf := make([]byte, 1)
+	if _, err := sio.conn.Read(buf); err != nil {
+		return fmt.Errorf("failed to read ACK: %w", err)
 	}
+
+	if buf[0] != ackChar {
+		return fmt.Errorf("invalid ACK received: %v", buf[0])
+	}
+
+	sio.logger.Info("Initialization sequence completed successfully")
+	return nil
 }
 
 // Stop signals us to shut down our serial connection, if one is active

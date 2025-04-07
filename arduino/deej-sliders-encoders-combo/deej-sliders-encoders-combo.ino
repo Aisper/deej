@@ -1,9 +1,9 @@
 #include <RotaryEncoder.h>
 #include <AisperButton.h>
 
-#define NUM_POTS 1
-#define NUM_BUTTONS 2
-#define NUM_ENCODERS 1
+#define NUM_POTS 3
+#define NUM_BUTTONS 5
+#define NUM_ENCODERS 2
 
 #define LONG_CLICK_TIME 1000
 #define MAX_TIME_BETWEEN_CLICKS 300
@@ -14,13 +14,13 @@
 #define ENCODER_MAX ENCODER_RESOLUTION
 #define ENCODER_MIN 0
 
-//const int potPins[NUM_POTS] PROGMEM = { A0, A1, A2 };
-//const int buttonPins[NUM_BUTTONS] PROGMEM = { 5, 4, 6, 7, 8 };
-//const int encoderPins[NUM_ENCODERS * 2] PROGMEM = { 9, 10, 11, 12 };
+const char HANDSHAKE_CHAR = '>';
+const char ACK_CHAR = '<';
+const unsigned long HANDSHAKE_TIMEOUT = 5000;
 
-const int potPins[NUM_POTS] = { A0 };
-const int buttonPins[NUM_BUTTONS] = { 5, 4 };
-const int encoderPins[NUM_ENCODERS * 2] = { 9, 10 };
+const int potPins[NUM_POTS] = { A1, A2, A3 };
+const int buttonPins[NUM_BUTTONS] = { 14, 15, 18, 4, 7 };
+const int encoderPins[NUM_ENCODERS * 2] = { 2, 3, 5, 6 };
 
 struct VolData {
   int value;
@@ -65,29 +65,58 @@ bool receiveData(uint8_t* outArray, uint8_t size, char startMarker = '>', char e
   return receiving;
 }
 
+bool performHandshake() {
+  unsigned long startTime = millis();
+  unsigned long lastHandshakeTime = 0;
+  const unsigned long handshakeInterval = 300;  // Send every 300ms
+
+  while (millis() - startTime < HANDSHAKE_TIMEOUT) {
+    // Check for incoming data
+    if (Serial.available() > 0) {
+      char received = Serial.read();
+      if (received == HANDSHAKE_CHAR) {
+        Serial.write(ACK_CHAR);
+        return true;
+      } else if (received == ACK_CHAR) {
+        return true;
+      }
+    }
+
+    // Send handshake periodically
+    if (millis() - lastHandshakeTime >= handshakeInterval) {
+      Serial.write(HANDSHAKE_CHAR);
+      lastHandshakeTime = millis();
+    }
+  }
+
+  return false;
+}
+
 void setup() {
   Serial.begin(9600);
-
-  while (!Serial) {
-  }
 }
 
 void waitInit() {
-  uint8_t dataSize = NUM_POTS + NUM_ENCODERS;
-  uint8_t initBytes[dataSize];
-
-  Serial.print('>');
-
-  if (!receiveData(initBytes, dataSize)) {
+  while (!performHandshake()) {
+    delay(300);
     return;
   }
 
-  for (int i = 0; i < dataSize; i++) {
-    int mappedValue = map(initBytes[i], 0, 255, 0, 1023);
-    setValue(i, mappedValue);
+  uint8_t dataSize = NUM_POTS + NUM_ENCODERS;
+  uint8_t initBytes[dataSize];
+
+  // Handshake successful, wait for initialization data
+  if (receiveData(initBytes, dataSize)) {
+    for (int i = 0; i < dataSize; i++) {
+      int mappedValue = map(initBytes[i], 0, 255, 0, 1023);
+      setValue(i, mappedValue);
+    }
   }
 
   Init();
+
+  // Send ACK that we received the data
+  Serial.write(ACK_CHAR);
 }
 
 void Init() {
@@ -110,14 +139,11 @@ void Init() {
   }
 
   initialized_soft = true;
-  Serial.print('<');
 }
 
 void loop() {
-  uint8_t reinit_signal[1];
-
-  if (receiveData(reinit_signal, 1)) {
-    if (reinit_signal[0] == '!') {
+  if (Serial.available() > 1) {
+    if (Serial.read() == HANDSHAKE_CHAR) {
       initialized_soft = false;
     }
   }
@@ -137,9 +163,9 @@ void loop() {
 
   tickPots();
 
-  sendValues();
+  //sendValues();
 
-  //printValues();
+  printValues();
 }
 
 void setValue(uint8_t index, int newValue) {
