@@ -8,10 +8,10 @@
 # important: slider indexes start at 0, regardless of which analog pins you're using!
 slider_mapping:
   0: spotify.exe
-  1: system
-  # 2:
-  # 3: system
-  # 4: deej.current
+  1: discord.exe
+  2:
+  3: master
+  4: deej.current
 
 # set this to true if you want the controls inverted (i.e. top is 0%, bottom is 100%)
 invert_sliders: false

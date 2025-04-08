@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -108,10 +109,11 @@ func (sio *SerialIO) Start() error {
 	namedLogger.Infow("Connected", "conn", sio.conn)
 	sio.connected = true
 
-	if err := sio.performInitializationSequence(); err != nil {
-		sio.close(namedLogger) // Clean up if initialization fails
-		return fmt.Errorf("initialization failed: %w", err)
+	initData := sio.produceInitData()
+	if _, err := sio.conn.Write(initData); err != nil {
+		return fmt.Errorf("failed to send initialization data: %w", err)
 	}
+	sio.logger.Infow("Sent init data ", "data", initData)
 
 	// read lines or await a stop
 	go func() {
@@ -131,93 +133,8 @@ func (sio *SerialIO) Start() error {
 	return nil
 }
 
-const (
-	handshakeTimeout       = 5 * time.Second
-	handshakeRetryInterval = 500 * time.Millisecond
-	handshakeChar          = '>'
-	ackChar                = '<'
-)
-
-func (sio *SerialIO) performHandshake() error {
-	sio.logger.Info("Starting handshake protocol")
-
-	// Flush any existing data in the buffer
-	if flusher, ok := sio.conn.(interface{ Flush() error }); ok {
-		flusher.Flush()
-	}
-
-	handshakeDone := make(chan bool)
-	errChan := make(chan error)
-
-	// Start handshake routine
-	go func() {
-		buf := make([]byte, 1)
-		retryTicker := time.NewTicker(handshakeRetryInterval)
-		defer retryTicker.Stop()
-
-		// Send initial handshake signal
-		if _, err := sio.conn.Write([]byte{handshakeChar}); err != nil {
-			errChan <- fmt.Errorf("failed to send handshake: %w", err)
-			return
-		}
-
-		for {
-			select {
-			case <-handshakeDone:
-				return
-			case <-retryTicker.C:
-				// Resend handshake periodically
-				if _, err := sio.conn.Write([]byte{handshakeChar}); err != nil {
-					errChan <- fmt.Errorf("failed to resend handshake: %w", err)
-					return
-				}
-			default:
-				// Check for response
-				n, err := sio.conn.Read(buf)
-				if err != nil {
-					if err != io.EOF {
-						errChan <- fmt.Errorf("read error during handshake: %w", err)
-						return
-					}
-					continue
-				}
-
-				if n > 0 {
-					switch buf[0] {
-					case handshakeChar:
-						// Arduino is initiating handshake
-						sio.logger.Debug("Received handshake initiation from Arduino")
-						if _, err := sio.conn.Write([]byte{ackChar}); err != nil {
-							errChan <- err
-							return
-						}
-						handshakeDone <- true
-						return
-					case ackChar:
-						// Arduino acknowledged our handshake
-						sio.logger.Debug("Received handshake ACK from Arduino")
-						handshakeDone <- true
-						return
-					}
-				}
-			}
-		}
-	}()
-
-	// Wait for handshake completion or timeout
-	select {
-	case <-handshakeDone:
-		sio.logger.Info("Handshake completed successfully")
-		return nil
-	case err := <-errChan:
-		return err
-	case <-time.After(handshakeTimeout):
-		return fmt.Errorf("handshake timed out after %v", handshakeTimeout)
-	}
-}
-
 func (sio *SerialIO) produceInitData() []byte {
-	volumes := make(map[int]int)
+	volumes := make([]byte, len(sio.deej.config.SliderMapping.m))
 
 	for ind, targets := range sio.deej.config.SliderMapping.m {
 
@@ -225,6 +142,8 @@ func (sio *SerialIO) produceInitData() []byte {
 
 		// for each possible target for this slider...
 		for _, target := range targets {
+
+			sio.logger.Infow("trying", "target", target)
 
 			// resolve the target name by cleaning it up and applying any special transformations.
 			// depending on the transformation applied, this can result in more than one target name
@@ -238,12 +157,16 @@ func (sio *SerialIO) produceInitData() []byte {
 
 				// no sessions matching this target - move on
 				if !ok {
+					volumes[ind] = 0
 					continue
 				}
 
-				volumes[ind] = int(sessions[0].GetVolume())
-				found = true
+				mappedVol := byte(math.Min(math.Max(float64(sessions[0].GetVolume()), 0), 1)*255 + 0.5)
+				sio.logger.Infow("found", "target", target, "vol", mappedVol)
 
+				volumes[ind] = mappedVol
+
+				found = true
 				break
 			}
 
@@ -257,46 +180,14 @@ func (sio *SerialIO) produceInitData() []byte {
 		}
 	}
 
-	// Send initialization data to the Arduino
-	initData := make([]byte, 0, len(volumes)+2)
+	initData := make([]byte, 0, len(volumes))
 
-	initData = append(initData, '>')
 	for _, value := range volumes {
-
-		if value < 0 || value > 255 {
-			panic("value exceeds 2 bytes")
-		}
-
-		initData = append(initData, byte(value))
+		sio.logger.Infow("adding", "val", value)
+		initData = append(initData, value)
 	}
-	initData = append(initData, '<')
 
 	return initData
-}
-
-func (sio *SerialIO) performInitializationSequence() error {
-	if err := sio.performHandshake(); err != nil {
-		return fmt.Errorf("handshake failed: %w", err)
-	}
-
-	// Send initialization data
-	initData := sio.produceInitData()
-	if _, err := sio.conn.Write(initData); err != nil {
-		return fmt.Errorf("failed to send initialization data: %w", err)
-	}
-
-	// Wait for ACK that data was received
-	buf := make([]byte, 1)
-	if _, err := sio.conn.Read(buf); err != nil {
-		return fmt.Errorf("failed to read ACK: %w", err)
-	}
-
-	if buf[0] != ackChar {
-		return fmt.Errorf("invalid ACK received: %v", buf[0])
-	}
-
-	sio.logger.Info("Initialization sequence completed successfully")
-	return nil
 }
 
 // Stop signals us to shut down our serial connection, if one is active

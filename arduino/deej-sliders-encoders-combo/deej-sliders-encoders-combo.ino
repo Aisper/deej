@@ -14,10 +14,6 @@
 #define ENCODER_MAX ENCODER_RESOLUTION
 #define ENCODER_MIN 0
 
-const char HANDSHAKE_CHAR = '>';
-const char ACK_CHAR = '<';
-const unsigned long HANDSHAKE_TIMEOUT = 5000;
-
 const int potPins[NUM_POTS] = { A1, A2, A3 };
 const int buttonPins[NUM_BUTTONS] = { 14, 15, 18, 4, 7 };
 const int encoderPins[NUM_ENCODERS * 2] = { 2, 3, 5, 6 };
@@ -31,126 +27,63 @@ VolData values[NUM_POTS + NUM_ENCODERS];
 Button* buttons[NUM_BUTTONS];
 RotaryEncoder* encoders[NUM_ENCODERS];
 
-bool initialized_soft;
-bool initialized_hard;
-
-bool receiveData(uint8_t* outArray, uint8_t size, char startMarker = '>', char endMarker = '<') {
+bool receiveData(uint8_t* receivedData, uint8_t len) {
+  bool bReceiving = false;
   uint8_t index = 0;
-  bool receiving = false;
 
   while (Serial.available() > 0) {
     uint8_t byte = Serial.read();
 
-    if (byte == startMarker) {
-      receiving = true;
-      continue;
-    }
+    bReceiving = true;
+    receivedData[index] = byte;
 
-    if (!receiving) {
-      continue;
-    }
-
-    if (byte == endMarker) {
-      break;
-    }
-
-    outArray[index] = byte;
     index++;
 
-    if (index >= size) {
-      index = size - 1;
+    if (index >= len) {
+      break;
     }
   }
 
-  return receiving;
-}
-
-bool performHandshake() {
-  unsigned long startTime = millis();
-  unsigned long lastHandshakeTime = 0;
-  const unsigned long handshakeInterval = 300;  // Send every 300ms
-
-  while (millis() - startTime < HANDSHAKE_TIMEOUT) {
-    // Check for incoming data
-    if (Serial.available() > 0) {
-      char received = Serial.read();
-      if (received == HANDSHAKE_CHAR) {
-        Serial.write(ACK_CHAR);
-        return true;
-      } else if (received == ACK_CHAR) {
-        return true;
-      }
-    }
-
-    // Send handshake periodically
-    if (millis() - lastHandshakeTime >= handshakeInterval) {
-      Serial.write(HANDSHAKE_CHAR);
-      lastHandshakeTime = millis();
-    }
-  }
-
-  return false;
+  return bReceiving;
 }
 
 void setup() {
   Serial.begin(9600);
-}
-
-void waitInit() {
-  while (!performHandshake()) {
-    delay(300);
-    return;
-  }
-
-  uint8_t dataSize = NUM_POTS + NUM_ENCODERS;
-  uint8_t initBytes[dataSize];
-
-  // Handshake successful, wait for initialization data
-  if (receiveData(initBytes, dataSize)) {
-    for (int i = 0; i < dataSize; i++) {
-      int mappedValue = map(initBytes[i], 0, 255, 0, 1023);
-      setValue(i, mappedValue);
-    }
-  }
 
   Init();
-
-  // Send ACK that we received the data
-  Serial.write(ACK_CHAR);
 }
 
 void Init() {
-  if (!initialized_hard) {
-    for (int i = 0; i < NUM_POTS; i++) {
-      pinMode(potPins[i], INPUT);
-    }
-
-    for (int i = 0; i < NUM_BUTTONS; i++) {
-      buttons[i] = new Button(buttonPins[i], MAX_TIME_BETWEEN_CLICKS, LONG_CLICK_TIME, true);
-    }
-
-    for (int i = 0; i < NUM_ENCODERS; i++) {
-      encoders[i] = new RotaryEncoder(encoderPins[i], encoderPins[i + 1], RotaryEncoder::LatchMode::TWO03);
-      int mappedValue = map(getValue(NUM_POTS + i), 0, DATA_RESOLUTION, ENCODER_MIN, ENCODER_RESOLUTION);
-
-      encoders[i]->setPosition(mappedValue);
-    }
-    initialized_hard = true;
+  for (int i = 0; i < NUM_POTS; i++) {
+    pinMode(potPins[i], INPUT);
   }
 
-  initialized_soft = true;
+  for (int i = 0; i < NUM_BUTTONS; i++) {
+    buttons[i] = new Button(buttonPins[i], MAX_TIME_BETWEEN_CLICKS, LONG_CLICK_TIME, true);
+  }
+
+  for (int i = 0; i < NUM_ENCODERS; i++) {
+    encoders[i] = new RotaryEncoder(encoderPins[i * 2], encoderPins[i * 2 + 1], RotaryEncoder::LatchMode::TWO03);
+  }
+
+  for (int i = 0; i < NUM_POTS + NUM_ENCODERS; i++) {
+    values[i].mute = false;
+  }
 }
 
 void loop() {
-  if (Serial.available() > 1) {
-    if (Serial.read() == HANDSHAKE_CHAR) {
-      initialized_soft = false;
-    }
-  }
+  uint8_t receivedData[NUM_ENCODERS + NUM_POTS];
+  if (receiveData(receivedData, NUM_ENCODERS + NUM_POTS)) {
+    // process incoming data
+    for (uint8_t i = 0; i < NUM_POTS + NUM_ENCODERS; i++) {
+      int mappedValue = map((byte)receivedData[i], 0, 255, 0, 1023);
+      setValue(i, mappedValue);
 
-  if (!initialized_soft) {
-    waitInit();
-    return;
+      if (i >= NUM_POTS) {
+        mappedValue = map(mappedValue, 0, 1023, ENCODER_MIN, ENCODER_MAX);
+        encoders[i - NUM_POTS]->setPosition(mappedValue);
+      }
+    }
   }
 
   for (int i = 0; i < NUM_ENCODERS; i++) {
@@ -163,9 +96,9 @@ void loop() {
 
   tickPots();
 
-  //sendValues();
+  sendValues();
 
-  printValues();
+  //printValues();
 }
 
 void setValue(uint8_t index, int newValue) {
@@ -203,13 +136,12 @@ void tickButton(uint8_t index) {
 
   button->tick();
 
-  if (button->isPressed() && button->currentStateTime() >= 200) {
+  if (button->isPressed() && button->currentStateTime() >= 300) {
     values[index].mute = true;
+    return;
   }
 
   if (button->isThereAnEvent()) {
-    Button::ButtonEvent event = button->getCurrentEvent();
-
     values[index].mute = !values[index].mute;
 
     button->ClearEvent();
