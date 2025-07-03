@@ -9,7 +9,7 @@
 slider_mapping:
   0: spotify.exe
   1: discord.exe
-  2:
+  2: UnrealEditor-Win64-DebugGame.exe
   3: master
   4: deej.current
 
@@ -17,7 +17,7 @@ slider_mapping:
 invert_sliders: false
 
 # settings for connecting to the arduino board
-com_port: COM5
+com_port: COM3
 baud_rate: 9600
 
 # adjust the amount of signal noise reduction depending on your hardware quality

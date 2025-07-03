@@ -49,7 +49,7 @@ bool receiveData(uint8_t* receivedData, uint8_t len) {
 
 void setup() {
   Serial.begin(9600);
-
+  delay(300);
   Init();
 }
 
@@ -64,10 +64,6 @@ void Init() {
 
   for (int i = 0; i < NUM_ENCODERS; i++) {
     encoders[i] = new RotaryEncoder(encoderPins[i * 2], encoderPins[i * 2 + 1], RotaryEncoder::LatchMode::TWO03);
-  }
-
-  for (int i = 0; i < NUM_POTS + NUM_ENCODERS; i++) {
-    values[i].mute = false;
   }
 }
 
@@ -86,19 +82,19 @@ void loop() {
     }
   }
 
-  for (int i = 0; i < NUM_ENCODERS; i++) {
-    tickEncoder(i);
-  }
-
   for (int i = 0; i < NUM_BUTTONS; i++) {
     tickButton(i);
   }
 
+  for (int i = 0; i < NUM_ENCODERS; i++) {
+    tickEncoder(i);
+  }
+
   tickPots();
 
-  sendValues();
+  //sendValues();
 
-  //printValues();
+  printValues();
 }
 
 void setValue(uint8_t index, int newValue) {
