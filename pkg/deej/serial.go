@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -13,6 +12,7 @@ import (
 
 	"github.com/jacobsa/go-serial/serial"
 	"go.uber.org/zap"
+	"golang.org/x/exp/slices"
 
 	"github.com/omriharel/deej/pkg/deej/util"
 )
@@ -34,8 +34,6 @@ type SerialIO struct {
 	currentSliderPercentValues []float32
 
 	sliderMoveConsumers []chan SliderMoveEvent
-
-	initCalled bool
 }
 
 // SliderMoveEvent represents a single slider move captured by deej
@@ -44,7 +42,7 @@ type SliderMoveEvent struct {
 	PercentValue float32
 }
 
-var expectedLinePattern = regexp.MustCompile(`^\d{1,4}(\|\d{1,4})*\r\n$`)
+var expectedLinePattern = regexp.MustCompile(`^-?\d{1,4}(\|-?\d{1,4})*\r\n$`)
 
 // NewSerialIO creates a SerialIO instance that uses the provided deej
 // instance's connection info to establish communications with the arduino chip
@@ -111,11 +109,6 @@ func (sio *SerialIO) Start() error {
 	namedLogger.Infow("Connected", "conn", sio.conn)
 	sio.connected = true
 
-	if err := sio.sendInitData(); err != nil {
-		sio.logger.Warnw("Failed to send Init data to arduino", "error", err)
-		return fmt.Errorf("serial init. sending init data: %w", err)
-	}
-
 	// read lines or await a stop
 	go func() {
 		connReader := bufio.NewReader(sio.conn)
@@ -131,76 +124,7 @@ func (sio *SerialIO) Start() error {
 		}
 	}()
 
-	sio.initCalled = true
-
 	return nil
-}
-
-func (sio *SerialIO) sendInitData() error {
-	initData := sio.produceInitData()
-	if _, err := sio.conn.Write(initData); err != nil {
-		return fmt.Errorf("failed to send initialization data: %w", err)
-	}
-	sio.logger.Infow("Sent init data ", "data", initData)
-
-	return nil
-}
-
-func (sio *SerialIO) produceInitData() []byte {
-	volumes := make([]byte, len(sio.deej.config.SliderMapping.m))
-
-	for ind, targets := range sio.deej.config.SliderMapping.m {
-
-		found := false
-
-		// for each possible target for this slider...
-		for _, target := range targets {
-
-			sio.logger.Infow("trying", "target", target)
-
-			// resolve the target name by cleaning it up and applying any special transformations.
-			// depending on the transformation applied, this can result in more than one target name
-			resolvedTargets := sio.deej.sessions.resolveTarget(target)
-
-			// for each resolved target...
-			for _, resolvedTarget := range resolvedTargets {
-
-				// check the map for matching sessions
-				sessions, ok := sio.deej.sessions.get(resolvedTarget)
-
-				// no sessions matching this target - move on
-				if !ok {
-					volumes[ind] = 0
-					continue
-				}
-
-				mappedVol := byte(math.Min(math.Max(float64(sessions[0].GetVolume()), 0), 1)*255 + 0.5)
-				sio.logger.Infow("found", "target", target, "vol", mappedVol)
-
-				volumes[ind] = mappedVol
-
-				found = true
-				break
-			}
-
-			if found {
-				break
-			}
-		}
-
-		if found {
-			continue
-		}
-	}
-
-	initData := make([]byte, 0, len(volumes))
-
-	for _, value := range volumes {
-		sio.logger.Infow("adding", "val", value)
-		initData = append(initData, value)
-	}
-
-	return initData
 }
 
 // Stop signals us to shut down our serial connection, if one is active
@@ -352,6 +276,27 @@ func (sio *SerialIO) handleLine(logger *zap.SugaredLogger, line string) {
 		// if sliders are inverted, take the complement of 1.0
 		if sio.deej.config.InvertSliders {
 			normalizedScalar = 1 - normalizedScalar
+		}
+
+		if slices.Contains(sio.deej.config.AdditiveIndices, sliderIdx) {
+			if number == 0 {
+				continue
+			}
+
+			finalVolume := sio.deej.sessions.getCurrentVolume(sliderIdx) + dirtyFloat
+
+			if sio.deej.verbose {
+				sio.logger.Debugw("Setting encoder volume", "number", number, "normalizedScalar", normalizedScalar, "final scalar", finalVolume)
+			}
+
+			if finalVolume < 0 {
+				finalVolume = 0
+			}
+			if finalVolume > 1 {
+				finalVolume = 1
+			}
+
+			normalizedScalar = finalVolume
 		}
 
 		// check if it changes the desired state (could just be a jumpy raw slider value)

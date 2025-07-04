@@ -13,6 +13,10 @@ slider_mapping:
   3: master
   4: deej.current
 
+# an array of slider indices that should be considered additive. These sliders' values would not replace the volume but be added to the current volume instead.
+# it's primarily used for rotary encoders
+additive_indices: [3, 4]
+
 # set this to true if you want the controls inverted (i.e. top is 0%, bottom is 100%)
 invert_sliders: false
 
@@ -22,4 +26,5 @@ baud_rate: 9600
 
 # adjust the amount of signal noise reduction depending on your hardware quality
 # supported values are "low" (excellent hardware), "default" (regular hardware) or "high" (bad, noisy hardware)
-noise_reduction: default
+# new value: "extraLow" (0.01 - for cleaning on the hardware)
+noise_reduction: extraLow

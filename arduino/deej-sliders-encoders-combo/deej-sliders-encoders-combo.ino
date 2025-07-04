@@ -9,10 +9,8 @@
 #define MAX_TIME_BETWEEN_CLICKS 300
 
 #define DATA_RESOLUTION 1024
-
-#define ENCODER_RESOLUTION 50
-#define ENCODER_MAX ENCODER_RESOLUTION
-#define ENCODER_MIN 0
+#define DENOIZE 8
+#define DATA_SEND_THRESHOLD 10
 
 const int potPins[NUM_POTS] = { A1, A2, A3 };
 const int buttonPins[NUM_BUTTONS] = { 14, 15, 18, 4, 7 };
@@ -23,29 +21,10 @@ struct VolData {
   bool mute = false;
 };
 
+VolData lastSentValues[NUM_POTS + NUM_ENCODERS];
 VolData values[NUM_POTS + NUM_ENCODERS];
 Button* buttons[NUM_BUTTONS];
 RotaryEncoder* encoders[NUM_ENCODERS];
-
-bool receiveData(uint8_t* receivedData, uint8_t len) {
-  bool bReceiving = false;
-  uint8_t index = 0;
-
-  while (Serial.available() > 0) {
-    uint8_t byte = Serial.read();
-
-    bReceiving = true;
-    receivedData[index] = byte;
-
-    index++;
-
-    if (index >= len) {
-      break;
-    }
-  }
-
-  return bReceiving;
-}
 
 void setup() {
   Serial.begin(9600);
@@ -68,20 +47,6 @@ void Init() {
 }
 
 void loop() {
-  uint8_t receivedData[NUM_ENCODERS + NUM_POTS];
-  if (receiveData(receivedData, NUM_ENCODERS + NUM_POTS)) {
-    // process incoming data
-    for (uint8_t i = 0; i < NUM_POTS + NUM_ENCODERS; i++) {
-      int mappedValue = map((byte)receivedData[i], 0, 255, 0, 1023);
-      setValue(i, mappedValue);
-
-      if (i >= NUM_POTS) {
-        mappedValue = map(mappedValue, 0, 1023, ENCODER_MIN, ENCODER_MAX);
-        encoders[i - NUM_POTS]->setPosition(mappedValue);
-      }
-    }
-  }
-
   for (int i = 0; i < NUM_BUTTONS; i++) {
     tickButton(i);
   }
@@ -92,13 +57,13 @@ void loop() {
 
   tickPots();
 
-  //sendValues();
+  trySendValues();
 
-  printValues();
+  //printValues();
 }
 
 void setValue(uint8_t index, int newValue) {
-  int clamped = constrain(newValue, 0, DATA_RESOLUTION - 1);
+  int clamped = constrain(newValue, -(DATA_RESOLUTION - 1), DATA_RESOLUTION - 1);
   values[index].value = clamped;
 }
 
@@ -111,19 +76,14 @@ void tickEncoder(uint8_t index) {
 
   encoder->tick();
 
-  int rawValue = encoder->getPosition();
+  const RotaryEncoder::Direction direction = encoder->getDirection();
 
-  int clampedValue = constrain(rawValue, ENCODER_MIN, ENCODER_MAX);
-  int mappedValue = map(clampedValue, ENCODER_MIN, ENCODER_MAX, 0, DATA_RESOLUTION - 1);
+  const int newValue = (int)direction * 22;
 
-  if (rawValue != clampedValue) {
-    encoder->setPosition(clampedValue);
-  }
+  const int valueIndex = NUM_POTS + index;
 
-  int valueIndex = NUM_POTS + index;
-
-  if (abs(abs(mappedValue) - abs(values[valueIndex].value)) != 0) {
-    setValue(valueIndex, mappedValue);
+  if (values[valueIndex].value != newValue) {
+    setValue(valueIndex, newValue);
   }
 }
 
@@ -149,9 +109,30 @@ void tickPots() {
     int rawValue = analogRead(potPins[i]);
     int mappedValue = map(rawValue, 0, 1023, 0, DATA_RESOLUTION - 1);
 
-    if (abs(abs(mappedValue) - abs(values[i].value)) > 2) {
+    if (abs(abs(mappedValue) - abs(values[i].value)) > DENOIZE) {
       setValue(i, mappedValue);
     }
+  }
+}
+
+void trySendValues() {
+  bool shouldSendValues = false;
+
+  for (int i = 0; i < NUM_POTS + NUM_ENCODERS; i++) {
+    const int minValue = min(lastSentValues[i].value, values[i].value);
+    const int maxValue = max(lastSentValues[i].value, values[i].value);
+
+    // using threshold only for pots because encoders have synthetic data that can be compared raw
+    const bool changeSignificantEnough = i < NUM_POTS ? abs(maxValue - minValue) >= DATA_SEND_THRESHOLD : lastSentValues[i].value != values[i].value;
+
+    if (changeSignificantEnough || lastSentValues[i].mute != values[i].mute) {
+      shouldSendValues = true;
+      break;
+    }
+  }
+
+  if (shouldSendValues) {
+    sendValues();
   }
 }
 
@@ -164,6 +145,8 @@ void sendValues() {
     if (i < NUM_POTS + NUM_ENCODERS - 1) {
       builtString += String("|");
     }
+
+    lastSentValues[i] = values[i];
   }
 
   Serial.println(builtString);
