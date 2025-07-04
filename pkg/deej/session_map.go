@@ -119,6 +119,10 @@ func (m *sessionMap) getAndAddSessions() error {
 
 	m.logger.Infow("Got all audio sessions successfully", "sessionMap", m)
 
+	if m.deej.serial.initCalled {
+		m.deej.serial.sendInitData()
+	}
+
 	return nil
 }
 

@@ -34,6 +34,8 @@ type SerialIO struct {
 	currentSliderPercentValues []float32
 
 	sliderMoveConsumers []chan SliderMoveEvent
+
+	initCalled bool
 }
 
 // SliderMoveEvent represents a single slider move captured by deej
@@ -109,11 +111,10 @@ func (sio *SerialIO) Start() error {
 	namedLogger.Infow("Connected", "conn", sio.conn)
 	sio.connected = true
 
-	initData := sio.produceInitData()
-	if _, err := sio.conn.Write(initData); err != nil {
-		return fmt.Errorf("failed to send initialization data: %w", err)
+	if err := sio.sendInitData(); err != nil {
+		sio.logger.Warnw("Failed to send Init data to arduino", "error", err)
+		return fmt.Errorf("serial init. sending init data: %w", err)
 	}
-	sio.logger.Infow("Sent init data ", "data", initData)
 
 	// read lines or await a stop
 	go func() {
@@ -129,6 +130,18 @@ func (sio *SerialIO) Start() error {
 			}
 		}
 	}()
+
+	sio.initCalled = true
+
+	return nil
+}
+
+func (sio *SerialIO) sendInitData() error {
+	initData := sio.produceInitData()
+	if _, err := sio.conn.Write(initData); err != nil {
+		return fmt.Errorf("failed to send initialization data: %w", err)
+	}
+	sio.logger.Infow("Sent init data ", "data", initData)
 
 	return nil
 }
