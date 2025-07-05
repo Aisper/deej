@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -34,6 +33,11 @@ type SerialIO struct {
 	currentSliderPercentValues []float32
 
 	sliderMoveConsumers []chan SliderMoveEvent
+}
+
+type ArduinoData struct {
+	Value int
+	Mute  bool
 }
 
 // SliderMoveEvent represents a single slider move captured by deej
@@ -112,14 +116,14 @@ func (sio *SerialIO) Start() error {
 	// read lines or await a stop
 	go func() {
 		connReader := bufio.NewReader(sio.conn)
-		lineChannel := sio.readLine(namedLogger, connReader)
+		bytesChannel := sio.readBytes(namedLogger, connReader)
 
 		for {
 			select {
 			case <-sio.stopChannel:
 				sio.close(namedLogger)
-			case line := <-lineChannel:
-				sio.handleLine(namedLogger, line)
+			case bytes := <-bytesChannel:
+				sio.handleBytes(namedLogger, bytes)
 			}
 		}
 	}()
@@ -226,20 +230,58 @@ func (sio *SerialIO) readLine(logger *zap.SugaredLogger, reader *bufio.Reader) c
 	return ch
 }
 
-func (sio *SerialIO) handleLine(logger *zap.SugaredLogger, line string) {
-	// this function receives an unsanitized line which is guaranteed to end with LF,
-	// but most lines will end with CRLF. it may also have garbage instead of
-	// deej-formatted values, so we must check for that! just ignore bad ones
-	if !expectedLinePattern.MatchString(line) {
-		return
+func (sio *SerialIO) readBytes(logger *zap.SugaredLogger, reader *bufio.Reader) chan []byte {
+	ch := make(chan []byte)
+
+	go func() {
+		for {
+			bytes, err := reader.ReadBytes('\n')
+			if err != nil {
+				if sio.deej.Verbose() {
+					logger.Warnw("Failed to read bytes from serial", "error", err, "bytes", bytes)
+
+					return
+				}
+			}
+
+			if sio.deej.Verbose() {
+				logger.Debugw("Read new bytes", "bytes", bytes)
+			}
+
+			ch <- bytes[:len(bytes)-1]
+		}
+	}()
+
+	return ch
+}
+
+func (sio *SerialIO) handleBytes(logger *zap.SugaredLogger, bytes []byte) {
+	data := []ArduinoData{}
+
+	if len(bytes)%2 != 0 {
+		logger.Warnw("Wrong number of bytes received", "bytes number", len(bytes))
 	}
 
-	// trim the suffix
-	line = strings.TrimSuffix(line, "\r\n")
+	for i := 0; i < len(bytes); i += 2 {
+		data = append(data, ArduinoData{})
+		newDataIdx := len(data) - 1
 
-	// split on pipe (|), this gives a slice of numerical strings between "0" and "1023"
-	splitLine := strings.Split(line, "|")
-	numSliders := len(splitLine)
+		packed := uint16(bytes[i])<<8 | uint16(bytes[i+1])
+
+		data[newDataIdx].Mute = (packed>>11)&0x01 != 0
+
+		rawValue := packed & 0x07FF
+
+		if rawValue&0x0400 != 0 {
+			data[newDataIdx].Value = int(int16(rawValue | 0xF800))
+		} else {
+			data[newDataIdx].Value = int(rawValue)
+		}
+	}
+
+	logger.Debugw("Reconstructed data", "data", data)
+
+	numSliders := len(data)
 
 	// update our slider count, if needed - this will send slider move events for all
 	if numSliders != sio.lastKnownNumSliders {
@@ -255,15 +297,14 @@ func (sio *SerialIO) handleLine(logger *zap.SugaredLogger, line string) {
 
 	// for each slider:
 	moveEvents := []SliderMoveEvent{}
-	for sliderIdx, stringValue := range splitLine {
+	for sliderIdx, arduinoData := range data {
 
-		// convert string values to integers ("1023" -> 1023)
-		number, _ := strconv.Atoi(stringValue)
+		number := arduinoData.Value
 
 		// turns out the first line could come out dirty sometimes (i.e. "4558|925|41|643|220")
 		// so let's check the first number for correctness just in case
 		if sliderIdx == 0 && number > 1023 {
-			sio.logger.Debugw("Got malformed line from serial, ignoring", "line", line)
+			sio.logger.Debugw("Got malformed line from serial, ignoring", "data", arduinoData)
 			return
 		}
 

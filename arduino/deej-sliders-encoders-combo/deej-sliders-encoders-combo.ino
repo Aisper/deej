@@ -137,19 +137,16 @@ void trySendValues() {
 }
 
 void sendValues() {
-  String builtString = String("");
-
   for (int i = 0; i < NUM_POTS + NUM_ENCODERS; i++) {
-    builtString += String(getValue(i));
+    uint16_t packed = ((values[i].mute & 0x01) << 11) | ((uint16_t)values[i].value & 0x07FF);
 
-    if (i < NUM_POTS + NUM_ENCODERS - 1) {
-      builtString += String("|");
-    }
+    Serial.write((packed >> 8) & 0xFF);
+    Serial.write(packed & 0xFF);
 
     lastSentValues[i] = values[i];
   }
 
-  Serial.println(builtString);
+  Serial.write('\n');
 }
 
 void printValues() {
