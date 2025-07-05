@@ -142,7 +142,7 @@ func (m *sessionMap) setupOnSliderMove() {
 		for {
 			select {
 			case event := <-sliderEventsChannel:
-				m.handleSliderMoveEvent(event)
+				m.handleSliderEvent(event)
 			}
 		}
 	}()
@@ -236,7 +236,7 @@ func (m *sessionMap) getCurrentVolume(sliderIdx int) float32 {
 	return -1
 }
 
-func (m *sessionMap) handleSliderMoveEvent(event SliderMoveEvent) {
+func (m *sessionMap) handleSliderEvent(event SliderEvent) {
 	// first of all, ensure our session map isn't moldy
 	if m.lastSessionRefresh.Add(maxTimeBetweenSessionRefreshes).Before(time.Now()) {
 		m.logger.Debug("Stale session map detected on slider move, refreshing")
@@ -279,6 +279,15 @@ func (m *sessionMap) handleSliderMoveEvent(event SliderMoveEvent) {
 				if session.GetVolume() != event.PercentValue {
 					if err := session.SetVolume(event.PercentValue); err != nil {
 						m.logger.Warnw("Failed to set target session volume", "error", err)
+						adjustmentFailed = true
+					}
+				}
+
+				if event.ToggleMute {
+					sessionMute := session.GetMute()
+
+					if err := session.SetMute(!sessionMute); err != nil {
+						m.logger.Warnw("Failed to set target session mute", "error", err)
 						adjustmentFailed = true
 					}
 				}

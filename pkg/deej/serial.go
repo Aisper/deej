@@ -29,21 +29,27 @@ type SerialIO struct {
 	connOptions serial.OpenOptions
 	conn        io.ReadWriteCloser
 
-	lastKnownNumSliders        int
-	currentSliderPercentValues []float32
+	lastKnownNumSliders int
+	currentVolumeDatas  []VolumeData
 
-	sliderMoveConsumers []chan SliderMoveEvent
+	sliderMoveConsumers []chan SliderEvent
 }
 
-type ArduinoData struct {
-	Value int
+type VolumeData struct {
+	Value float32
 	Mute  bool
 }
 
-// SliderMoveEvent represents a single slider move captured by deej
-type SliderMoveEvent struct {
+type ArduinoData struct {
+	Value      int
+	ToggleMute bool
+}
+
+// SliderEvent represents a single slider move captured by deej
+type SliderEvent struct {
 	SliderID     int
 	PercentValue float32
+	ToggleMute   bool
 }
 
 var expectedLinePattern = regexp.MustCompile(`^-?\d{1,4}(\|-?\d{1,4})*\r\n$`)
@@ -59,7 +65,7 @@ func NewSerialIO(deej *Deej, logger *zap.SugaredLogger) (*SerialIO, error) {
 		stopChannel:         make(chan bool),
 		connected:           false,
 		conn:                nil,
-		sliderMoveConsumers: []chan SliderMoveEvent{},
+		sliderMoveConsumers: []chan SliderEvent{},
 	}
 
 	logger.Debug("Created serial i/o instance")
@@ -143,8 +149,8 @@ func (sio *SerialIO) Stop() {
 
 // SubscribeToSliderMoveEvents returns an unbuffered channel that receives
 // a sliderMoveEvent struct every time a slider moves
-func (sio *SerialIO) SubscribeToSliderMoveEvents() chan SliderMoveEvent {
-	ch := make(chan SliderMoveEvent)
+func (sio *SerialIO) SubscribeToSliderMoveEvents() chan SliderEvent {
+	ch := make(chan SliderEvent)
 	sio.sliderMoveConsumers = append(sio.sliderMoveConsumers, ch)
 
 	return ch
@@ -240,7 +246,7 @@ func (sio *SerialIO) handleBytes(logger *zap.SugaredLogger, bytes []byte) {
 
 		packed := uint16(bytes[i])<<8 | uint16(bytes[i+1])
 
-		data[newDataIdx].Mute = (packed>>11)&0x01 != 0
+		data[newDataIdx].ToggleMute = (packed>>11)&0x01 != 0
 
 		rawValue := packed & 0x07FF
 
@@ -259,16 +265,16 @@ func (sio *SerialIO) handleBytes(logger *zap.SugaredLogger, bytes []byte) {
 	if numSliders != sio.lastKnownNumSliders {
 		logger.Infow("Detected sliders", "amount", numSliders)
 		sio.lastKnownNumSliders = numSliders
-		sio.currentSliderPercentValues = make([]float32, numSliders)
+		sio.currentVolumeDatas = make([]VolumeData, numSliders)
 
 		// reset everything to be an impossible value to force the slider move event later
-		for idx := range sio.currentSliderPercentValues {
-			sio.currentSliderPercentValues[idx] = -1.0
+		for idx := range sio.currentVolumeDatas {
+			sio.currentVolumeDatas[idx].Value = -1.0
 		}
 	}
 
 	// for each slider:
-	moveEvents := []SliderMoveEvent{}
+	sliderEvents := []SliderEvent{}
 	for sliderIdx, arduinoData := range data {
 
 		number := arduinoData.Value
@@ -292,47 +298,47 @@ func (sio *SerialIO) handleBytes(logger *zap.SugaredLogger, bytes []byte) {
 		}
 
 		if slices.Contains(sio.deej.config.AdditiveIndices, sliderIdx) {
-			if number == 0 {
-				continue
-			}
+			finalVolume := sio.deej.sessions.getCurrentVolume(sliderIdx)
 
-			finalVolume := sio.deej.sessions.getCurrentVolume(sliderIdx) + dirtyFloat
+			if number != 0 {
+				finalVolume += normalizedScalar
 
-			if sio.deej.verbose {
-				sio.logger.Debugw("Setting encoder volume", "number", number, "normalizedScalar", normalizedScalar, "final scalar", finalVolume)
-			}
-
-			if finalVolume < 0 {
-				finalVolume = 0
-			}
-			if finalVolume > 1 {
-				finalVolume = 1
+				if finalVolume < 0 {
+					finalVolume = 0
+				}
+				if finalVolume > 1 {
+					finalVolume = 1
+				}
 			}
 
 			normalizedScalar = finalVolume
 		}
 
 		// check if it changes the desired state (could just be a jumpy raw slider value)
-		if util.SignificantlyDifferent(sio.currentSliderPercentValues[sliderIdx], normalizedScalar, sio.deej.config.NoiseReductionLevel) {
+		significantlyDifferent := util.SignificantlyDifferent(sio.currentVolumeDatas[sliderIdx].Value, normalizedScalar, sio.deej.config.NoiseReductionLevel)
+
+		if significantlyDifferent || arduinoData.ToggleMute {
 
 			// if it does, update the saved value and create a move event
-			sio.currentSliderPercentValues[sliderIdx] = normalizedScalar
+			sio.currentVolumeDatas[sliderIdx].Value = normalizedScalar
+			sio.currentVolumeDatas[sliderIdx].Mute = !sio.currentVolumeDatas[sliderIdx].Mute
 
-			moveEvents = append(moveEvents, SliderMoveEvent{
+			sliderEvents = append(sliderEvents, SliderEvent{
 				SliderID:     sliderIdx,
 				PercentValue: normalizedScalar,
+				ToggleMute:   arduinoData.ToggleMute,
 			})
 
 			if sio.deej.Verbose() {
-				logger.Debugw("Slider moved", "event", moveEvents[len(moveEvents)-1])
+				logger.Debugw("Slider event", "event", sliderEvents[len(sliderEvents)-1])
 			}
 		}
 	}
 
 	// deliver move events if there are any, towards all potential consumers
-	if len(moveEvents) > 0 {
+	if len(sliderEvents) > 0 {
 		for _, consumer := range sio.sliderMoveConsumers {
-			for _, moveEvent := range moveEvents {
+			for _, moveEvent := range sliderEvents {
 				consumer <- moveEvent
 			}
 		}

@@ -18,7 +18,7 @@ const int encoderPins[NUM_ENCODERS * 2] = { 2, 3, 5, 6 };
 
 struct VolData {
   int value;
-  bool mute = false;
+  bool toggleMute = false;
 };
 
 VolData lastSentValues[NUM_POTS + NUM_ENCODERS];
@@ -68,7 +68,7 @@ void setValue(uint8_t index, int newValue) {
 }
 
 int getValue(uint8_t index) {
-  return values[index].mute ? 0 : values[index].value;
+  return values[index].toggleMute ? 0 : values[index].value;
 }
 
 void tickEncoder(uint8_t index) {
@@ -92,13 +92,13 @@ void tickButton(uint8_t index) {
 
   button->tick();
 
-  if (button->isPressed() && button->currentStateTime() >= 300) {
-    values[index].mute = true;
+  if (button->isPressed() && button->currentStateTime() >= 300 && !values[index].toggleMute) {
+    values[index].toggleMute = true;
     return;
   }
 
   if (button->isThereAnEvent()) {
-    values[index].mute = !values[index].mute;
+    values[index].toggleMute = !values[index].toggleMute;
 
     button->ClearEvent();
   }
@@ -125,7 +125,7 @@ void trySendValues() {
     // using threshold only for pots because encoders have synthetic data that can be compared raw
     const bool changeSignificantEnough = i < NUM_POTS ? abs(maxValue - minValue) >= DATA_SEND_THRESHOLD : lastSentValues[i].value != values[i].value;
 
-    if (changeSignificantEnough || lastSentValues[i].mute != values[i].mute) {
+    if (changeSignificantEnough || values[i].toggleMute) {
       shouldSendValues = true;
       break;
     }
@@ -133,12 +133,16 @@ void trySendValues() {
 
   if (shouldSendValues) {
     sendValues();
+
+    for (int i = 0; i < NUM_POTS + NUM_ENCODERS; i++) {
+      values[i].toggleMute = false;
+    }
   }
 }
 
 void sendValues() {
   for (int i = 0; i < NUM_POTS + NUM_ENCODERS; i++) {
-    uint16_t packed = ((values[i].mute & 0x01) << 11) | ((uint16_t)values[i].value & 0x07FF);
+    uint16_t packed = ((values[i].toggleMute & 0x01) << 11) | ((uint16_t)values[i].value & 0x07FF);
 
     Serial.write((packed >> 8) & 0xFF);
     Serial.write(packed & 0xFF);
@@ -153,7 +157,7 @@ void printValues() {
   for (int i = 0; i < NUM_POTS + NUM_ENCODERS; i++) {
     String printedString = String("Value #") + String(i + 1) + String(": ") + String(getValue(i));
 
-    if (values[i].mute) {
+    if (values[i].toggleMute) {
       printedString += "(m)";
     }
 
