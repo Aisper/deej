@@ -238,6 +238,7 @@ func (sio *SerialIO) handleBytes(logger *zap.SugaredLogger, bytes []byte) {
 
 	if len(bytes)%2 != 0 {
 		logger.Warnw("Wrong number of bytes received", "bytes number", len(bytes))
+		return
 	}
 
 	for i := 0; i < len(bytes); i += 2 {
