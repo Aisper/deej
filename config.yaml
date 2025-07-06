@@ -7,7 +7,10 @@
 # windows only - you can use 'system' to control the "system sounds" volume
 # important: slider indexes start at 0, regardless of which analog pins you're using!
 slider_mapping:
-  0: spotify.exe
+  0:
+    - spotify.exe
+    - JellyfinMediaPlayer.exe
+    - vivaldi.exe
   1: discord.exe
   2: UnrealEditor-Win64-DebugGame.exe
   3: master
