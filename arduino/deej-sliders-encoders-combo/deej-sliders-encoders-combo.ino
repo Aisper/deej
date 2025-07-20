@@ -10,7 +10,10 @@
 
 #define DATA_RESOLUTION 1024
 #define DENOIZE 8
-#define DATA_SEND_THRESHOLD 10
+
+#define DATA_SEND_THRESHOLD 5
+#define START_MARKER 0xAA
+#define END_MARKER 0x55
 
 const int potPins[NUM_POTS] = { A1, A2, A3 };
 const int buttonPins[NUM_BUTTONS] = { 14, 15, 18, 4, 7 };
@@ -58,7 +61,6 @@ void loop() {
   tickPots();
 
   trySendValues();
-
   //printValues();
 }
 
@@ -107,9 +109,16 @@ void tickButton(uint8_t index) {
 void tickPots() {
   for (int i = 0; i < NUM_POTS; i++) {
     int rawValue = analogRead(potPins[i]);
-    int mappedValue = map(rawValue, 0, 1023, 0, DATA_RESOLUTION - 1);
+    int mappedValue = rawValue;
 
     if (abs(abs(mappedValue) - abs(values[i].value)) > DENOIZE) {
+      if (mappedValue >= 1000) {
+        mappedValue = 1023;
+      }
+      if (mappedValue <= 10) {
+        mappedValue = 0;
+      }
+
       setValue(i, mappedValue);
     }
   }
@@ -141,19 +150,47 @@ void trySendValues() {
 }
 
 void sendValues() {
-  for (int i = 0; i < NUM_POTS + NUM_ENCODERS; i++) {
+  const uint8_t FRAME_SIZE = (NUM_POTS + NUM_ENCODERS);
+  uint8_t buf[FRAME_SIZE * 2 + 2];
+
+  int idx = 0;
+
+  buf[idx++] = START_MARKER;
+
+  for (int i = 0; i < FRAME_SIZE; i++) {
     uint16_t packed = ((values[i].toggleMute & 0x01) << 11) | ((uint16_t)values[i].value & 0x07FF);
 
-    Serial.write((packed >> 8) & 0xFF);
-    Serial.write(packed & 0xFF);
+    buf[idx++] = (packed >> 8) & 0xFF;
+    buf[idx++] = packed & 0xFF;
 
     lastSentValues[i] = values[i];
   }
 
-  Serial.write('\n');
+  buf[idx++] = END_MARKER;
+
+  Serial.write(buf, idx);
 }
 
 void printValues() {
+  bool shouldSendValues = false;
+
+  for (int i = 0; i < NUM_POTS + NUM_ENCODERS; i++) {
+    const int minValue = min(lastSentValues[i].value, values[i].value);
+    const int maxValue = max(lastSentValues[i].value, values[i].value);
+
+    // using threshold only for pots because encoders have synthetic data that can be compared raw
+    const bool changeSignificantEnough = i < NUM_POTS ? abs(maxValue - minValue) >= DATA_SEND_THRESHOLD : lastSentValues[i].value != values[i].value;
+
+    if (changeSignificantEnough || values[i].toggleMute) {
+      shouldSendValues = true;
+      break;
+    }
+  }
+
+  if (!shouldSendValues) {
+    return;
+  }
+
   for (int i = 0; i < NUM_POTS + NUM_ENCODERS; i++) {
     String printedString = String("Value #") + String(i + 1) + String(": ") + String(getValue(i));
 
@@ -168,5 +205,7 @@ void printValues() {
     } else {
       Serial.write("\n");
     }
+
+    lastSentValues[i] = values[i];
   }
 }

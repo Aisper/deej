@@ -5,15 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"regexp"
 	"strings"
 	"time"
 
 	"github.com/jacobsa/go-serial/serial"
+	"github.com/omriharel/deej/pkg/deej/util"
 	"go.uber.org/zap"
 	"golang.org/x/exp/slices"
-
-	"github.com/omriharel/deej/pkg/deej/util"
 )
 
 // SerialIO provides a deej-aware abstraction layer to managing serial I/O
@@ -213,20 +213,31 @@ func (sio *SerialIO) readBytes(logger *zap.SugaredLogger, reader *bufio.Reader) 
 
 	go func() {
 		for {
-			bytes, err := reader.ReadBytes('\n')
-			if err != nil {
-				if sio.deej.Verbose() {
-					logger.Warnw("Failed to read bytes from serial", "error", err, "bytes", bytes)
+			b, _ := reader.ReadByte()
 
-					return
-				}
+			if b != 0xAA {
+				continue
+			}
+
+			frameSize := len(sio.deej.config.SliderMapping.m)*2 + 1
+			payload := make([]byte, frameSize)
+
+			if _, err := io.ReadFull(reader, payload); err != nil {
+				logger.Warnw("Failed to read bytes from serial", "error", err)
+				close(ch)
+				return
 			}
 
 			if sio.deej.Verbose() {
-				logger.Debugw("Read new bytes", "bytes", bytes)
+				logger.Debugw("got frame", "len", len(payload), "hex", fmt.Sprintf("% X", payload))
 			}
 
-			ch <- bytes[:len(bytes)-1]
+			if payload[len(payload)-1] != 0x55 {
+				logger.Debugw("wrong end byte", "byte", payload[frameSize-1])
+				continue
+			}
+
+			ch <- payload[:frameSize-1]
 		}
 	}()
 
@@ -236,7 +247,7 @@ func (sio *SerialIO) readBytes(logger *zap.SugaredLogger, reader *bufio.Reader) 
 func (sio *SerialIO) handleBytes(logger *zap.SugaredLogger, bytes []byte) {
 	data := []ArduinoData{}
 
-	if len(bytes)%2 != 0 {
+	if len(bytes) != len(sio.deej.config.SliderMapping.m)*2 {
 		logger.Warnw("Wrong number of bytes received", "bytes number", len(bytes))
 		return
 	}
@@ -298,7 +309,9 @@ func (sio *SerialIO) handleBytes(logger *zap.SugaredLogger, bytes []byte) {
 			normalizedScalar = 1 - normalizedScalar
 		}
 
-		if slices.Contains(sio.deej.config.AdditiveIndices, sliderIdx) {
+		additive := slices.Contains(sio.deej.config.AdditiveIndices, sliderIdx)
+
+		if additive {
 			finalVolume := sio.deej.sessions.getCurrentVolume(sliderIdx)
 
 			if number != 0 {
@@ -315,8 +328,14 @@ func (sio *SerialIO) handleBytes(logger *zap.SugaredLogger, bytes []byte) {
 			normalizedScalar = finalVolume
 		}
 
+		if sio.deej.config.UseLogVolume && !additive {
+			normalizedScalar = LinearToLog(normalizedScalar)
+			logger.Infow("Bent linear to Log", "Linear", dirtyFloat, "Log", normalizedScalar)
+		}
+
 		// check if it changes the desired state (could just be a jumpy raw slider value)
-		significantlyDifferent := util.SignificantlyDifferent(sio.currentVolumeDatas[sliderIdx].Value, normalizedScalar, sio.deej.config.NoiseReductionLevel)
+		// significantlyDifferent := util.SignificantlyDifferent(sio.currentVolumeDatas[sliderIdx].Value, normalizedScalar, sio.deej.config.NoiseReductionLevel)
+		significantlyDifferent := true
 
 		if significantlyDifferent || arduinoData.ToggleMute {
 
@@ -344,4 +363,27 @@ func (sio *SerialIO) handleBytes(logger *zap.SugaredLogger, bytes []byte) {
 			}
 		}
 	}
+}
+
+const (
+	minDB = -60.0
+	maxDB = 0.0
+)
+
+// FromLinear converts a 0.0–1.0 UI value into an amplitude multiplier.
+func LinearToLog(x float32) float32 {
+	// Clamp just in case.
+	if x <= 0 {
+		return 0
+	} else if x >= 1 {
+		return 1
+	}
+
+	// Map the linear position to decibels.
+	db := minDB + x*(maxDB-minDB) // lerp
+
+	// Convert dB to amplitude. (dB = 20 * log10(A))
+	amp := math.Pow(10.0, float64(db/20.0))
+
+	return float32(amp)
 }
