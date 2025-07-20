@@ -149,8 +149,9 @@ void trySendValues() {
   }
 }
 
+const uint8_t FRAME_SIZE = (NUM_POTS + NUM_ENCODERS);
+
 void sendValues() {
-  const uint8_t FRAME_SIZE = (NUM_POTS + NUM_ENCODERS);
   uint8_t buf[FRAME_SIZE * 2 + 2];
 
   int idx = 0;
