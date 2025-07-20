@@ -19,12 +19,13 @@ slider_mapping:
 # an array of slider indices that should be considered additive. These sliders' values would not replace the volume but be added to the current volume instead.
 # it's primarily used for rotary encoders
 additive_indices: [3, 4]
+use_log_volume: true
 
 # set this to true if you want the controls inverted (i.e. top is 0%, bottom is 100%)
 invert_sliders: false
 
 # settings for connecting to the arduino board
-com_port: COM3
+com_port: COM5
 baud_rate: 9600
 
 # adjust the amount of signal noise reduction depending on your hardware quality

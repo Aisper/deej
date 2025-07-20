@@ -25,6 +25,8 @@ type CanonicalConfig struct {
 		BaudRate int
 	}
 
+	UseLogVolume bool
+
 	InvertSliders bool
 
 	NoiseReductionLevel string
@@ -56,6 +58,7 @@ const (
 	configKeyCOMPort             = "com_port"
 	configKeyBaudRate            = "baud_rate"
 	configKeyNoiseReductionLevel = "noise_reduction"
+	configKeyUseLogVolume        = "use_log_volume"
 
 	defaultCOMPort  = "COM4"
 	defaultBaudRate = 9600
@@ -151,7 +154,8 @@ func (cc *CanonicalConfig) Load() error {
 		"sliderMapping", cc.SliderMapping,
 		"additiveIndices", cc.AdditiveIndices,
 		"connectionInfo", cc.ConnectionInfo,
-		"invertSliders", cc.InvertSliders)
+		"invertSliders", cc.InvertSliders,
+		"UseLogVolume", cc.UseLogVolume)
 
 	return nil
 }
@@ -244,6 +248,7 @@ func (cc *CanonicalConfig) populateFromVipers() error {
 	}
 
 	cc.InvertSliders = cc.userConfig.GetBool(configKeyInvertSliders)
+	cc.UseLogVolume = cc.userConfig.GetBool(configKeyUseLogVolume)
 	cc.NoiseReductionLevel = cc.userConfig.GetString(configKeyNoiseReductionLevel)
 
 	cc.logger.Debug("Populated config fields from vipers")
