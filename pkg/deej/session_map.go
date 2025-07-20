@@ -276,6 +276,12 @@ func (m *sessionMap) handleSliderEvent(event SliderEvent) {
 
 			// iterate all matching sessions and adjust the volume of each one
 			for _, session := range sessions {
+				if target == specialTargetTransformPrefix+specialTargetCurrentWindow {
+					if m.sessionMapped(session) {
+						continue
+					}
+				}
+
 				if session.GetVolume() != event.PercentValue {
 					if err := session.SetVolume(event.PercentValue); err != nil {
 						m.logger.Warnw("Failed to set target session volume", "error", err)
