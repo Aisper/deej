@@ -330,12 +330,9 @@ func (sio *SerialIO) handleBytes(logger *zap.SugaredLogger, bytes []byte) {
 
 		if sio.deej.config.UseLogVolume && !additive {
 			normalizedScalar = LinearToLog(normalizedScalar)
-			logger.Infow("Bent linear to Log", "Linear", dirtyFloat, "Log", normalizedScalar)
 		}
 
-		// check if it changes the desired state (could just be a jumpy raw slider value)
-		// significantlyDifferent := util.SignificantlyDifferent(sio.currentVolumeDatas[sliderIdx].Value, normalizedScalar, sio.deej.config.NoiseReductionLevel)
-		significantlyDifferent := true
+		significantlyDifferent := math.Abs(float64(sio.currentVolumeDatas[sliderIdx].Value-normalizedScalar)) != 0
 
 		if significantlyDifferent || arduinoData.ToggleMute {
 
