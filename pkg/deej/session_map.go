@@ -23,6 +23,9 @@ type sessionMap struct {
 
 	lastSessionRefresh time.Time
 	unmappedSessions   []Session
+
+	ticker     *time.Ticker
+	tickerDone chan (bool)
 }
 
 const (
@@ -66,6 +69,7 @@ func newSessionMap(deej *Deej, logger *zap.SugaredLogger, sessionFinder SessionF
 		m:             make(map[string][]Session),
 		lock:          &sync.Mutex{},
 		sessionFinder: sessionFinder,
+		tickerDone:    make(chan (bool)),
 	}
 
 	logger.Debug("Created session map instance")
@@ -82,10 +86,26 @@ func (m *sessionMap) initialize() error {
 	m.setupOnConfigReload()
 	m.setupOnSliderMove()
 
+	m.ticker = time.NewTicker(time.Second)
+
+	go func() {
+		for {
+			select {
+			case <-m.tickerDone:
+				return
+			case <-m.ticker.C:
+				m.refreshSessions(false)
+			}
+		}
+	}()
+
 	return nil
 }
 
 func (m *sessionMap) release() error {
+	m.ticker.Stop()
+	m.tickerDone <- true
+
 	if err := m.sessionFinder.Release(); err != nil {
 		m.logger.Warnw("Failed to release session finder during session map release", "error", err)
 		return fmt.Errorf("release session finder during release: %w", err)

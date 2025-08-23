@@ -80,9 +80,10 @@ void tickEncoder(uint8_t index) {
 
   const RotaryEncoder::Direction direction = encoder->getDirection();
 
-  const int newValue = (int)direction * 22;
-
   const int valueIndex = NUM_POTS + index;
+
+  int newValue = getValue(valueIndex);
+  newValue += (int)direction * 22;
 
   if (values[valueIndex].value != newValue) {
     setValue(valueIndex, newValue);
@@ -142,6 +143,10 @@ void trySendValues() {
 
   if (shouldSendValues) {
     sendValues();
+
+    for (int i = NUM_POTS; i < NUM_POTS + NUM_ENCODERS; i++) {
+      values[i].value = 0;
+    }
 
     for (int i = 0; i < NUM_POTS + NUM_ENCODERS; i++) {
       values[i].toggleMute = false;

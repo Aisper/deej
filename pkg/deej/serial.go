@@ -314,6 +314,10 @@ func (sio *SerialIO) handleBytes(logger *zap.SugaredLogger, bytes []byte) {
 		if additive {
 			finalVolume := sio.deej.sessions.getCurrentVolume(sliderIdx)
 
+			if finalVolume < 0 {
+				continue
+			}
+
 			if number != 0 {
 				finalVolume += normalizedScalar
 

@@ -13,7 +13,10 @@ slider_mapping:
     - vivaldi.exe
   1: discord.exe
   2: UnrealEditor-Win64-DebugGame.exe
-  3: master
+  3:
+    - system
+    - master
+    - ShellExperienceHost.exe
   4: deej.current
 
 # an array of slider indices that should be considered additive. These sliders' values would not replace the volume but be added to the current volume instead.
