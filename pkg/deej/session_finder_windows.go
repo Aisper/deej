@@ -5,12 +5,11 @@ import (
 	"fmt"
 	"runtime"
 	"strings"
-	"syscall"
 	"time"
 	"unsafe"
 
 	ole "github.com/go-ole/go-ole"
-	wca "github.com/moutend/go-wca"
+	wca "github.com/moutend/go-wca/pkg/wca"
 	"go.uber.org/zap"
 )
 
@@ -25,9 +24,13 @@ type wcaSessionFinder struct {
 	mmNotificationClient    *wca.IMMNotificationClient
 	lastDefaultDeviceChange time.Time
 
+	audioSessionNotification *wca.IAudioSessionNotification
+
 	// our master input and output sessions
 	masterOut *masterSession
 	masterIn  *masterSession
+
+	sessions []Session
 }
 
 const (
@@ -115,7 +118,7 @@ func (sf *wcaSessionFinder) GetAllSessions() ([]Session, error) {
 
 	// receive notifications whenever the default device changes (only do this once)
 	if sf.mmNotificationClient == nil {
-		if err := sf.registerDefaultDeviceChangeCallback(); err != nil {
+		if err := sf.registerCallbacks(); err != nil {
 			sf.logger.Warnw("Failed to register default device change callback", "error", err)
 			return nil, fmt.Errorf("register default device change callback: %w", err)
 		}
@@ -129,6 +132,7 @@ func (sf *wcaSessionFinder) GetAllSessions() ([]Session, error) {
 	}
 
 	sessions = append(sessions, sf.masterOut)
+	sf.addNewSession(sf.masterOut)
 
 	// get the master input session, if a default input device exists
 	if defaultInputEndpoint != nil {
@@ -139,6 +143,7 @@ func (sf *wcaSessionFinder) GetAllSessions() ([]Session, error) {
 		}
 
 		sessions = append(sessions, sf.masterIn)
+		sf.addNewSession(sf.masterIn)
 	}
 
 	// enumerate all devices and make their "master" sessions bindable by friendly name;
@@ -160,6 +165,22 @@ func (sf *wcaSessionFinder) Release() error {
 	sf.logger.Debug("Released WCA session finder instance")
 
 	return nil
+}
+
+func (sf *wcaSessionFinder) onSessionCreated(newSession *wca.IAudioSessionControl) error {
+	session, error := sf.newSessionFromWcaControl(newSession)
+
+	if error != nil {
+		return error
+	}
+
+	sf.addNewSession(session)
+
+	return nil
+}
+
+func (sf *wcaSessionFinder) addNewSession(session Session) {
+	sf.sessions = append(sf.sessions, session)
 }
 
 func (sf *wcaSessionFinder) getDeviceEnumerator() error {
@@ -199,25 +220,23 @@ func (sf *wcaSessionFinder) getDefaultAudioEndpoints() (*wca.IMMDevice, *wca.IMM
 	return mmOutDevice, mmInDevice, nil
 }
 
-func (sf *wcaSessionFinder) registerDefaultDeviceChangeCallback() error {
-	sf.mmNotificationClient = &wca.IMMNotificationClient{}
-	sf.mmNotificationClient.VTable = &wca.IMMNotificationClientVtbl{}
+func (sf *wcaSessionFinder) registerCallbacks() error {
+	callback := wca.IMMNotificationClientCallback{
+		OnDefaultDeviceChanged: sf.defaultDeviceChangedCallback,
+	}
 
-	// fill the VTable with noops, except for OnDefaultDeviceChanged. that one's gold
-	sf.mmNotificationClient.VTable.QueryInterface = syscall.NewCallback(sf.noopCallback)
-	sf.mmNotificationClient.VTable.AddRef = syscall.NewCallback(sf.noopCallback)
-	sf.mmNotificationClient.VTable.Release = syscall.NewCallback(sf.noopCallback)
-	sf.mmNotificationClient.VTable.OnDeviceStateChanged = syscall.NewCallback(sf.noopCallback)
-	sf.mmNotificationClient.VTable.OnDeviceAdded = syscall.NewCallback(sf.noopCallback)
-	sf.mmNotificationClient.VTable.OnDeviceRemoved = syscall.NewCallback(sf.noopCallback)
-	sf.mmNotificationClient.VTable.OnPropertyValueChanged = syscall.NewCallback(sf.noopCallback)
-
-	sf.mmNotificationClient.VTable.OnDefaultDeviceChanged = syscall.NewCallback(sf.defaultDeviceChangedCallback)
+	sf.mmNotificationClient = wca.NewIMMNotificationClient(callback)
 
 	if err := sf.mmDeviceEnumerator.RegisterEndpointNotificationCallback(sf.mmNotificationClient); err != nil {
 		sf.logger.Warnw("Failed to call RegisterEndpointNotificationCallback", "error", err)
 		return fmt.Errorf("call RegisterEndpointNotificationCallback: %w", err)
 	}
+
+	sessionCallback := wca.IAudioSessionNotificationCallback{
+		OnSessionCreated: sf.onSessionCreated,
+	}
+
+	sf.audioSessionNotification = wca.NewIAudioSessionNotification(sessionCallback)
 
 	return nil
 }
@@ -364,6 +383,7 @@ func (sf *wcaSessionFinder) enumerateAndAddSessions(sessions *[]Session) error {
 
 		// add it to our slice
 		*sessions = append(*sessions, newSession)
+		sf.addNewSession(newSession)
 	}
 
 	return nil
@@ -423,65 +443,9 @@ func (sf *wcaSessionFinder) enumerateAndAddProcessSessions(
 			return fmt.Errorf("get session %d from enumerator: %w", sessionIdx, err)
 		}
 
-		// query its IAudioSessionControl2
-		dispatch, err := audioSessionControl.QueryInterface(wca.IID_IAudioSessionControl2)
-		if err != nil {
-			sf.logger.Warnw("Failed to query session's IAudioSessionControl2",
-				"error", err,
-				"sessionIdx", sessionIdx)
-
-			return fmt.Errorf("query session %d IAudioSessionControl2: %w", sessionIdx, err)
-		}
-
-		// we no longer need the IAudioSessionControl, release it
-		audioSessionControl.Release()
-
-		// receive a useful object instead of our dispatch
-		audioSessionControl2 := (*wca.IAudioSessionControl2)(unsafe.Pointer(dispatch))
-
-		var pid uint32
-
-		// get the session's PID
-		if err := audioSessionControl2.GetProcessId(&pid); err != nil {
-
-			// if this is the system sounds session, GetProcessId will error with an undocumented
-			// AUDCLNT_S_NO_CURRENT_PROCESS (0x889000D) - this is fine, we actually want to treat it a bit differently
-			// The first part of this condition will be true if the call to IsSystemSoundsSession fails
-			// The second part will be true if the original error mesage from GetProcessId doesn't contain this magical
-			// error code (in decimal format).
-			isSystemSoundsErr := audioSessionControl2.IsSystemSoundsSession()
-			if isSystemSoundsErr != nil && !strings.Contains(err.Error(), "143196173") {
-
-				// of course, if it's not the system sounds session, we got a problem
-				sf.logger.Warnw("Failed to query session's pid",
-					"error", err,
-					"isSystemSoundsError", isSystemSoundsErr,
-					"sessionIdx", sessionIdx)
-
-				return fmt.Errorf("query session %d pid: %w", sessionIdx, err)
-			}
-
-			// update 2020/08/31: this is also the exact case for UWP applications, so we should no longer override the PID.
-			// it will successfully update whenever we call GetProcessId for e.g. Video.UI.exe, despite the error being non-nil.
-		}
-
-		// get its ISimpleAudioVolume
-		dispatch, err = audioSessionControl2.QueryInterface(wca.IID_ISimpleAudioVolume)
-		if err != nil {
-			sf.logger.Warnw("Failed to query session's ISimpleAudioVolume",
-				"error", err,
-				"sessionIdx", sessionIdx)
-
-			return fmt.Errorf("query session %d ISimpleAudioVolume: %w", sessionIdx, err)
-		}
-
-		// make it useful, again
-		simpleAudioVolume := (*wca.ISimpleAudioVolume)(unsafe.Pointer(dispatch))
-
 		// create the deej session object
-		newSession, err := newWCASession(sf.sessionLogger, audioSessionControl2, simpleAudioVolume, pid, sf.eventCtx)
+		newSession, err := sf.newSessionFromWcaControl(audioSessionControl)
 		if err != nil {
-
 			// this could just mean this process is already closed by now, and the session will be cleaned up later by the OS
 			if !errors.Is(err, errNoSuchProcess) {
 				sf.logger.Warnw("Failed to create new WCA session instance",
@@ -491,32 +455,101 @@ func (sf *wcaSessionFinder) enumerateAndAddProcessSessions(
 				return fmt.Errorf("create wca session for session %d: %w", sessionIdx, err)
 			}
 
-			// in this case, log it and release the session's handles, then skip to the next one
-			sf.logger.Debugw("Process already exited, skipping session and releasing handles", "pid", pid)
-
-			audioSessionControl2.Release()
-			simpleAudioVolume.Release()
-
 			continue
 		}
 
 		// add it to our slice
 		*sessions = append(*sessions, newSession)
+		sf.addNewSession(newSession)
 	}
 
 	return nil
 }
 
-func (sf *wcaSessionFinder) defaultDeviceChangedCallback(
-	this *wca.IMMNotificationClient,
-	EDataFlow, eRole uint32,
-	lpcwstr uintptr,
-) (hResult uintptr) {
+func (sf *wcaSessionFinder) newSessionFromWcaControl(wcaSessionControl *wca.IAudioSessionControl) (*wcaSession, error) {
+	// query its IAudioSessionControl2
+	dispatch, err := wcaSessionControl.QueryInterface(wca.IID_IAudioSessionControl2)
+	if err != nil {
+		sf.logger.Warnw("Failed to query session's IAudioSessionControl2",
+			"error", err)
+
+		return nil, fmt.Errorf("query session IAudioSessionControl2: %w", err)
+	}
+
+	// we no longer need the IAudioSessionControl, release it
+	wcaSessionControl.Release()
+
+	// receive a useful object instead of our dispatch
+	wcaControl := (*wca.IAudioSessionControl2)(unsafe.Pointer(dispatch))
+
+	// get its ISimpleAudioVolume
+	dispatch, err = wcaControl.QueryInterface(wca.IID_ISimpleAudioVolume)
+	if err != nil {
+		sf.logger.Warnw("Failed to query session's ISimpleAudioVolume",
+			"error", err)
+
+		return nil, fmt.Errorf("query session ISimpleAudioVolume: %w", err)
+	}
+
+	var pid uint32
+
+	// get the session's PID
+	if err := wcaControl.GetProcessId(&pid); err != nil {
+
+		// if this is the system sounds session, GetProcessId will error with an undocumented
+		// AUDCLNT_S_NO_CURRENT_PROCESS (0x889000D) - this is fine, we actually want to treat it a bit differently
+		// The first part of this condition will be true if the call to IsSystemSoundsSession fails
+		// The second part will be true if the original error mesage from GetProcessId doesn't contain this magical
+		// error code (in decimal format).
+		isSystemSoundsErr := wcaControl.IsSystemSoundsSession()
+		if isSystemSoundsErr != nil && !strings.Contains(err.Error(), "143196173") {
+
+			// of course, if it's not the system sounds session, we got a problem
+			sf.logger.Warnw("Failed to query session's pid",
+				"error", err,
+				"isSystemSoundsError", isSystemSoundsErr)
+
+			return nil, fmt.Errorf("query session pid: %w", err)
+		}
+
+		// update 2020/08/31: this is also the exact case for UWP applications, so we should no longer override the PID.
+		// it will successfully update whenever we call GetProcessId for e.g. Video.UI.exe, despite the error being non-nil.
+	}
+
+	// make it useful, again
+	simpleAudioVolume := (*wca.ISimpleAudioVolume)(unsafe.Pointer(dispatch))
+
+	// create the deej session object
+	session, error := newWCASession(sf.sessionLogger, wcaControl, simpleAudioVolume, pid, sf.eventCtx)
+
+	if error != nil {
+
+		// this could just mean this process is already closed by now, and the session will be cleaned up later by the OS
+		if !errors.Is(err, errNoSuchProcess) {
+			sf.logger.Warnw("Failed to create new WCA session instance",
+				"error", err)
+
+			return nil, fmt.Errorf("create wca session for session %w", error)
+		}
+
+		// in this case, log it and release the session's handles, then skip to the next one
+		sf.logger.Debugw("Process already exited, skipping session and releasing handles", "pid", pid)
+
+		wcaControl.Release()
+		simpleAudioVolume.Release()
+		return nil, error
+
+	}
+
+	return session, nil
+}
+
+func (sf *wcaSessionFinder) defaultDeviceChangedCallback(flow wca.EDataFlow, role wca.ERole, pwstrDeviceId string) error {
 	// filter out calls that happen in rapid succession
 	now := time.Now()
 
 	if sf.lastDefaultDeviceChange.Add(minDefaultDeviceChangeThreshold).After(now) {
-		return
+		return nil
 	}
 
 	sf.lastDefaultDeviceChange = now
@@ -530,7 +563,7 @@ func (sf *wcaSessionFinder) defaultDeviceChangedCallback(
 		sf.masterIn.markAsStale()
 	}
 
-	return
+	return nil
 }
 
 func (sf *wcaSessionFinder) noopCallback() (hResult uintptr) {
