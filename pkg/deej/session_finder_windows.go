@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 	"unsafe"
 
@@ -16,6 +17,9 @@ import (
 type wcaSessionFinder struct {
 	logger        *zap.SugaredLogger
 	sessionLogger *zap.SugaredLogger
+
+	subsMU sync.RWMutex
+	subs   map[chan SessionEvent]struct{}
 
 	eventCtx *ole.GUID // needed for some session actions to successfully notify other audio consumers
 
@@ -51,11 +55,45 @@ func newSessionFinder(logger *zap.SugaredLogger) (SessionFinder, error) {
 		logger:        logger.Named("session_finder"),
 		sessionLogger: logger.Named("sessions"),
 		eventCtx:      ole.NewGUID(myteriousGUID),
+
+		subs: make(map[chan SessionEvent]struct{}),
 	}
 
 	sf.logger.Debug("Created WCA session finder instance")
 
 	return sf, nil
+}
+
+func (sf *wcaSessionFinder) SubscribeToSessionEvents(buffer int) (<-chan SessionEvent, func()) {
+	ch := make(chan SessionEvent, buffer)
+
+	sf.subsMU.Lock()
+	if sf.subs == nil {
+		sf.subs = make(map[chan SessionEvent]struct{})
+	}
+	sf.subs[ch] = struct{}{}
+	sf.subsMU.Unlock()
+
+	unsubscribe := func() {
+		sf.subsMU.Lock()
+		if _, ok := sf.subs[ch]; ok {
+			delete(sf.subs, ch)
+			close(ch)
+		}
+		sf.subsMU.Unlock()
+	}
+	return ch, unsubscribe
+}
+
+func (sf *wcaSessionFinder) publishEvent(event SessionEvent) {
+	sf.subsMU.RLock()
+	for ch := range sf.subs {
+		select {
+		case ch <- event:
+		default:
+		}
+	}
+	sf.subsMU.RUnlock()
 }
 
 func (sf *wcaSessionFinder) GetAllSessions() ([]Session, error) {
@@ -157,6 +195,13 @@ func (sf *wcaSessionFinder) GetAllSessions() ([]Session, error) {
 }
 
 func (sf *wcaSessionFinder) Release() error {
+	sf.subsMU.Lock()
+	for ch := range sf.subs {
+		close(ch)
+		delete(sf.subs, ch)
+	}
+	sf.subsMU.Unlock()
+
 	// skip unregistering the mmnotificationclient, as it's not implemented in go-wca
 	if sf.mmDeviceEnumerator != nil {
 		sf.mmDeviceEnumerator.Release()
@@ -180,7 +225,12 @@ func (sf *wcaSessionFinder) onSessionCreated(newSession *wca.IAudioSessionContro
 }
 
 func (sf *wcaSessionFinder) addNewSession(session Session) {
-	sf.sessions = append(sf.sessions, session)
+	// sf.sessions = append(sf.sessions, session)
+
+	sf.publishEvent(SessionEvent{
+		Type:    SessionDiscovered,
+		Session: session,
+	})
 }
 
 func (sf *wcaSessionFinder) getDeviceEnumerator() error {
@@ -232,11 +282,11 @@ func (sf *wcaSessionFinder) registerCallbacks() error {
 		return fmt.Errorf("call RegisterEndpointNotificationCallback: %w", err)
 	}
 
-	sessionCallback := wca.IAudioSessionNotificationCallback{
-		OnSessionCreated: sf.onSessionCreated,
-	}
+	// sessionCallback := wca.IAudioSessionNotificationCallback{
+	// 	OnSessionCreated: sf.onSessionCreated,
+	// }
 
-	sf.audioSessionNotification = wca.NewIAudioSessionNotification(sessionCallback)
+	// sf.audioSessionNotification = wca.NewIAudioSessionNotification(sessionCallback)
 
 	return nil
 }

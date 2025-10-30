@@ -16,6 +16,8 @@ type sessionMap struct {
 	deej   *Deej
 	logger *zap.SugaredLogger
 
+	releaseUnsub func()
+
 	m    map[string][]Session
 	lock sync.Locker
 
@@ -77,11 +79,45 @@ func newSessionMap(deej *Deej, logger *zap.SugaredLogger, sessionFinder SessionF
 	return m, nil
 }
 
+func (m *sessionMap) onNewSessionDiscovered(session Session) {
+	m.logger.Debugw("Session discovered", "session", session.Key())
+
+	if m.sessionMapped(session) {
+		sessionSliderIdx := m.findSliderIdxForSession(session)
+
+		if sessionSliderIdx == -1 {
+			return
+		}
+
+		if len(m.deej.serial.deej.serial.currentVolumeDatas) <= sessionSliderIdx {
+			return
+		}
+
+		sliderVolumeData := m.deej.serial.currentVolumeDatas[sessionSliderIdx]
+
+		if err := m.setSessionVolume(session, sliderVolumeData.Value, sliderVolumeData.Mute); err != nil {
+			m.logger.Warnw("Failed to set session volume", "error", err)
+		}
+	}
+}
+
 func (m *sessionMap) initialize() error {
+	eventCh, unsub := m.sessionFinder.SubscribeToSessionEvents(64)
+	go func() {
+		for event := range eventCh {
+			switch event.Type {
+			case SessionDiscovered:
+				m.onNewSessionDiscovered(event.Session)
+			}
+		}
+	}()
+
 	if err := m.getAndAddSessions(); err != nil {
 		m.logger.Warnw("Failed to get all sessions during session map initialization", "error", err)
 		return fmt.Errorf("get all sessions during init: %w", err)
 	}
+
+	m.releaseUnsub = unsub
 
 	m.setupOnConfigReload()
 	m.setupOnSliderMove()
@@ -105,6 +141,10 @@ func (m *sessionMap) initialize() error {
 func (m *sessionMap) release() error {
 	m.ticker.Stop()
 	m.tickerDone <- true
+
+	if m.releaseUnsub != nil {
+		m.releaseUnsub()
+	}
 
 	if err := m.sessionFinder.Release(); err != nil {
 		m.logger.Warnw("Failed to release session finder during session map release", "error", err)
@@ -185,7 +225,7 @@ func (m *sessionMap) refreshSessions(force bool) {
 	}
 }
 
-// returns true if a session is not currently mapped to any slider, false otherwise
+// returns true if a session is currently mapped to any slider, false otherwise
 // special sessions (master, system, mic) and device-specific sessions always count as mapped,
 // even when absent from the config. this makes sense for every current feature that uses "unmapped sessions"
 func (m *sessionMap) sessionMapped(session Session) bool {
@@ -199,9 +239,13 @@ func (m *sessionMap) sessionMapped(session Session) bool {
 		return true
 	}
 
-	matchFound := false
-
 	// look through the actual mappings
+	return m.findSliderIdxForSession(session) != -1
+}
+
+func (m *sessionMap) findSliderIdxForSession(session Session) int {
+	resultIdx := -1
+
 	m.deej.config.SliderMapping.iterate(func(sliderIdx int, targets []string) {
 		for _, target := range targets {
 
@@ -214,13 +258,12 @@ func (m *sessionMap) sessionMapped(session Session) bool {
 			target = m.resolveTarget(target)[0]
 
 			if target == session.Key() {
-				matchFound = true
-				return
+				resultIdx = sliderIdx
 			}
 		}
 	})
 
-	return matchFound
+	return resultIdx
 }
 
 func (m *sessionMap) getCurrentVolume(sliderIdx int) float32 {
@@ -254,6 +297,24 @@ func (m *sessionMap) getCurrentVolume(sliderIdx int) float32 {
 
 	m.logger.Warnw("SessionMap getCurrentVolume: couldn't find the session. returning -1", "sliderIdx", sliderIdx)
 	return -1
+}
+
+func (m *sessionMap) setSessionVolume(session Session, volume float32, mute bool) error {
+	if session.GetVolume() != volume {
+		if err := session.SetVolume(volume); err != nil {
+			m.logger.Warnw("Failed to set target session volume", "error", err)
+			return err
+		}
+	}
+
+	if session.GetMute() != mute {
+		if err := session.SetMute(mute); err != nil {
+			m.logger.Warnw("Failed to set target session mute", "error", err)
+			return err
+		}
+	}
+
+	return nil
 }
 
 func (m *sessionMap) handleSliderEvent(event SliderEvent) {
@@ -302,20 +363,14 @@ func (m *sessionMap) handleSliderEvent(event SliderEvent) {
 					}
 				}
 
-				if session.GetVolume() != event.PercentValue {
-					if err := session.SetVolume(event.PercentValue); err != nil {
-						m.logger.Warnw("Failed to set target session volume", "error", err)
-						adjustmentFailed = true
-					}
+				muteToSet := session.GetMute()
+				if event.ToggleMute {
+					muteToSet = !muteToSet
 				}
 
-				if event.ToggleMute {
-					sessionMute := session.GetMute()
-
-					if err := session.SetMute(!sessionMute); err != nil {
-						m.logger.Warnw("Failed to set target session mute", "error", err)
-						adjustmentFailed = true
-					}
+				if err := m.setSessionVolume(session, event.PercentValue, muteToSet); err != nil {
+					m.logger.Warnw("Failed to set target session volume", "error", err)
+					adjustmentFailed = true
 				}
 			}
 		}
