@@ -28,7 +28,9 @@ type wcaSessionFinder struct {
 	mmNotificationClient    *wca.IMMNotificationClient
 	lastDefaultDeviceChange time.Time
 
-	audioSessionNotification *wca.IAudioSessionNotification
+	sessionNotificationsMu sync.Mutex
+	sessionNotifications   []*wca.IAudioSessionNotification
+	sessionManagers        []*wca.IAudioSessionManager2
 
 	// our master input and output sessions
 	masterOut *masterSession
@@ -99,6 +101,8 @@ func (sf *wcaSessionFinder) publishEvent(event SessionEvent) {
 func (sf *wcaSessionFinder) GetAllSessions() ([]Session, error) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
+
+	sf.clearSessionNotifications()
 
 	sessions := []Session{}
 
@@ -202,6 +206,8 @@ func (sf *wcaSessionFinder) Release() error {
 	}
 	sf.subsMU.Unlock()
 
+	sf.clearSessionNotifications()
+
 	// skip unregistering the mmnotificationclient, as it's not implemented in go-wca
 	if sf.mmDeviceEnumerator != nil {
 		sf.mmDeviceEnumerator.Release()
@@ -210,6 +216,26 @@ func (sf *wcaSessionFinder) Release() error {
 	sf.logger.Debug("Released WCA session finder instance")
 
 	return nil
+}
+
+func (sf *wcaSessionFinder) clearSessionNotifications() {
+	sf.sessionNotificationsMu.Lock()
+	defer sf.sessionNotificationsMu.Unlock()
+
+	for i, manager := range sf.sessionManagers {
+		if i < len(sf.sessionNotifications) {
+			notification := sf.sessionNotifications[i]
+			if err := manager.UnregisterSessionNotification(notification); err != nil {
+				sf.logger.Warnw("Failed to unregister session notification", "error", err)
+			}
+			// Cast to IUnknown to call Release
+			(*ole.IUnknown)(unsafe.Pointer(notification)).Release()
+		}
+		manager.Release()
+	}
+
+	sf.sessionManagers = nil
+	sf.sessionNotifications = nil
 }
 
 func (sf *wcaSessionFinder) onSessionCreated(newSession *wca.IAudioSessionControl) error {
@@ -281,12 +307,6 @@ func (sf *wcaSessionFinder) registerCallbacks() error {
 		sf.logger.Warnw("Failed to call RegisterEndpointNotificationCallback", "error", err)
 		return fmt.Errorf("call RegisterEndpointNotificationCallback: %w", err)
 	}
-
-	// sessionCallback := wca.IAudioSessionNotificationCallback{
-	// 	OnSessionCreated: sf.onSessionCreated,
-	// }
-
-	// sf.audioSessionNotification = wca.NewIAudioSessionNotification(sessionCallback)
 
 	return nil
 }
@@ -460,7 +480,22 @@ func (sf *wcaSessionFinder) enumerateAndAddProcessSessions(
 		sf.logger.Warnw("Failed to activate endpoint as IAudioSessionManager2", "error", err)
 		return fmt.Errorf("activate endpoint: %w", err)
 	}
-	defer audioSessionManager2.Release()
+
+	// register for session creation notifications
+	audioSessionNotification := newAudioSessionNotification(sf.onSessionCreated)
+
+	if err := audioSessionManager2.RegisterSessionNotification(audioSessionNotification); err != nil {
+		sf.logger.Warnw("Failed to register session notification", "error", err)
+		(*ole.IUnknown)(unsafe.Pointer(audioSessionNotification)).Release()
+		// defer release of manager if we failed to register (since we aren't storing it)
+		defer audioSessionManager2.Release()
+	} else {
+		// store the manager and notification for later cleanup
+		sf.sessionNotificationsMu.Lock()
+		sf.sessionNotifications = append(sf.sessionNotifications, audioSessionNotification)
+		sf.sessionManagers = append(sf.sessionManagers, audioSessionManager2)
+		sf.sessionNotificationsMu.Unlock()
+	}
 
 	// get its IAudioSessionEnumerator
 	var sessionEnumerator *wca.IAudioSessionEnumerator
