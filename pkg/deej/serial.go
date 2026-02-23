@@ -337,7 +337,10 @@ func (sio *SerialIO) handleBytes(logger *zap.SugaredLogger, bytes []byte) {
 
 			// if it does, update the saved value and create a move event
 			sio.currentVolumeDatas[sliderIdx].Value = normalizedScalar
-			sio.currentVolumeDatas[sliderIdx].Mute = !sio.currentVolumeDatas[sliderIdx].Mute
+
+			if arduinoData.ToggleMute {
+				sio.currentVolumeDatas[sliderIdx].Mute = !sio.currentVolumeDatas[sliderIdx].Mute
+			}
 
 			sliderEvents = append(sliderEvents, SliderEvent{
 				SliderID:     sliderIdx,

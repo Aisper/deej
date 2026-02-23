@@ -79,11 +79,15 @@ func (m *sessionMap) onNewSessionDiscovered(session Session) {
 			return
 		}
 
-		if len(m.deej.serial.deej.serial.currentVolumeDatas) <= sessionSliderIdx {
+		if len(m.deej.serial.currentVolumeDatas) <= sessionSliderIdx {
 			return
 		}
 
 		sliderVolumeData := m.deej.serial.currentVolumeDatas[sessionSliderIdx]
+
+		if sliderVolumeData.Value < 0 {
+			return
+		}
 
 		if err := m.setSessionVolume(session, sliderVolumeData.Value, sliderVolumeData.Mute); err != nil {
 			m.logger.Warnw("Failed to set session volume", "error", err)

@@ -174,7 +174,6 @@ func (sf *wcaSessionFinder) GetAllSessions() ([]Session, error) {
 	}
 
 	sessions = append(sessions, sf.masterOut)
-	sf.addNewSession(sf.masterOut)
 
 	// get the master input session, if a default input device exists
 	if defaultInputEndpoint != nil {
@@ -185,7 +184,6 @@ func (sf *wcaSessionFinder) GetAllSessions() ([]Session, error) {
 		}
 
 		sessions = append(sessions, sf.masterIn)
-		sf.addNewSession(sf.masterIn)
 	}
 
 	// enumerate all devices and make their "master" sessions bindable by friendly name;
@@ -453,7 +451,6 @@ func (sf *wcaSessionFinder) enumerateAndAddSessions(sessions *[]Session) error {
 
 		// add it to our slice
 		*sessions = append(*sessions, newSession)
-		sf.addNewSession(newSession)
 	}
 
 	return nil
@@ -545,7 +542,6 @@ func (sf *wcaSessionFinder) enumerateAndAddProcessSessions(
 
 		// add it to our slice
 		*sessions = append(*sessions, newSession)
-		sf.addNewSession(newSession)
 	}
 
 	return nil
