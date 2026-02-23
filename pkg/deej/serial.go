@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"regexp"
 	"strings"
 	"time"
 
@@ -51,8 +50,6 @@ type SliderEvent struct {
 	PercentValue float32
 	ToggleMute   bool
 }
-
-var expectedLinePattern = regexp.MustCompile(`^-?\d{1,4}(\|-?\d{1,4})*\r\n$`)
 
 // NewSerialIO creates a SerialIO instance that uses the provided deej
 // instance's connection info to establish communications with the arduino chip
@@ -269,8 +266,6 @@ func (sio *SerialIO) handleBytes(logger *zap.SugaredLogger, bytes []byte) {
 		}
 	}
 
-	logger.Debugw("Reconstructed data", "data", data)
-
 	numSliders := len(data)
 
 	// update our slider count, if needed - this will send slider move events for all
@@ -371,7 +366,7 @@ const (
 	maxDB = 0.0
 )
 
-// FromLinear converts a 0.0–1.0 UI value into an amplitude multiplier.
+// LinearToLog converts a 0.0–1.0 UI value into an amplitude multiplier.
 func LinearToLog(x float32) float32 {
 	// Clamp just in case.
 	if x <= 0 {

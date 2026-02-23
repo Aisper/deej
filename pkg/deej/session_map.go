@@ -70,6 +70,8 @@ func newSessionMap(deej *Deej, logger *zap.SugaredLogger, sessionFinder SessionF
 func (m *sessionMap) onNewSessionDiscovered(session Session) {
 	m.logger.Debugw("Session discovered", "session", session.Key())
 
+	m.add(session)
+
 	if m.sessionMapped(session) {
 		sessionSliderIdx := m.findSliderIdxForSession(session)
 
@@ -267,7 +269,10 @@ func (m *sessionMap) getCurrentVolume(sliderIdx int) float32 {
 		}
 	}
 
-	m.logger.Warnw("SessionMap getCurrentVolume: couldn't find the session. returning -1", "sliderIdx", sliderIdx)
+	if m.deej.Verbose() {
+		m.logger.Warnw("SessionMap getCurrentVolume: couldn't find the session. returning -1", "sliderIdx", sliderIdx)
+	}
+
 	return -1
 }
 
@@ -305,6 +310,10 @@ func (m *sessionMap) handleSliderEvent(event SliderEvent) {
 		// depending on the transformation applied, this can result in more than one target name
 		resolvedTargets := m.resolveTarget(target)
 
+		if m.deej.Verbose() {
+			m.logger.Debugw("Resolved targets", "names", resolvedTargets)
+		}
+
 		// for each resolved target...
 		for _, resolvedTarget := range resolvedTargets {
 
@@ -314,6 +323,10 @@ func (m *sessionMap) handleSliderEvent(event SliderEvent) {
 			// no sessions matching this target - move on
 			if !ok {
 				continue
+			}
+
+			if m.deej.Verbose() {
+				m.logger.Debugw("Known sessions", "names", sessions)
 			}
 
 			// iterate all matching sessions and adjust the volume of each one
@@ -363,6 +376,10 @@ func (m *sessionMap) applyTargetTransform(specialTargetName string) []string {
 		// silently ignore errors here, as this is on deej's "hot path" (and it could just mean the user's running linux)
 		if err != nil {
 			return nil
+		}
+
+		if m.deej.Verbose() {
+			m.logger.Debugw("Current windows", "names", currentWindowProcessNames)
 		}
 
 		// we could have gotten a non-lowercase names from that, so let's ensure we return ones that are lowercase
